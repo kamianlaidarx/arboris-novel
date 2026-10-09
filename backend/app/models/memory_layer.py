@@ -43,7 +43,10 @@ class CharacterState(Base):
 
     id = Column(BIGINT_PK_TYPE, primary_key=True, autoincrement=True)
     project_id = Column(String(255), ForeignKey("novel_projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    character_id = Column(BigInteger, ForeignKey("blueprint_characters.id", ondelete="CASCADE"), nullable=False, index=True)
+    # 可空：角色状态是按 character_name 记录的，蓝图里不一定存在对应行
+    # （例如模型新引入的角色，或蓝图尚未生成）。写入 0 会违反外键约束，
+    # 所以在没有匹配的蓝图角色时应当写 NULL 而不是 0。
+    character_id = Column(BigInteger, ForeignKey("blueprint_characters.id", ondelete="SET NULL"), nullable=True, index=True)
     character_name = Column(String(255), nullable=False)  # 冗余存储，方便查询
     
     # 状态快照（章节结束时）

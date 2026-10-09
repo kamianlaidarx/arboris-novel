@@ -504,7 +504,9 @@ class FinalizeService:
             self.db.add(
                 CharacterState(
                     project_id=project_id,
-                    character_id=0,
+                    # NULL 而非 0：0 不是合法的 blueprint_characters.id，
+                    # 在外键开启（PRAGMA foreign_keys=ON）时会被拒绝。
+                    character_id=None,
                     character_name="__all__",
                     chapter_number=chapter_number,
                     extra={"raw_state_text": state_text},
@@ -528,7 +530,8 @@ class FinalizeService:
             prev = existing.get(name)
             state = CharacterState(
                 project_id=project_id,
-                character_id=prev.character_id if prev and prev.character_id else 0,
+                # 继承上一章的蓝图角色 id；没有就写 NULL（不能写 0，会违反外键）
+                character_id=prev.character_id if prev else None,
                 character_name=name,
                 chapter_number=chapter_number,
                 # 未提供的字段继承上一章
