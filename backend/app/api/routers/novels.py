@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.dependencies import get_current_user
@@ -28,6 +29,17 @@ from ...services.prompt_service import PromptService
 from ...utils.json_utils import remove_think_tags, sanitize_json_like_text, unwrap_markdown_json
 
 logger = logging.getLogger(__name__)
+
+
+def _sse(event: str, data: dict) -> str:
+    """把一个事件编码成 SSE 帧。
+
+    ``ensure_ascii=False`` 让中文按原样发送（而不是 \\uXXXX），
+    省带宽也便于调试。SSE 规范要求 data 内不能有裸换行，
+    因此 JSON 序列化后统一替换成字面量 ``\\n``。
+    """
+    payload = json.dumps(data, ensure_ascii=False).replace("\n", "\\n")
+    return f"event: {event}\ndata: {payload}\n\n"
 
 router = APIRouter(prefix="/api/novels", tags=["Novels"])
 
@@ -211,6 +223,118 @@ async def converse_with_concept(
 
     parsed.setdefault("conversation_state", parsed.get("conversation_state", {}))
     return ConverseResponse(**parsed)
+
+
+@router.post("/{project_id}/concept/converse-stream")
+async def converse_with_concept_stream(
+    project_id: str,
+    request: ConverseRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """概念对话的流式版本（SSE）。
+
+    与 ``converse`` 的区别只在传输方式：这里边生成边推送首字，
+    而不是攒完整段再返回。原因是长生成（几十秒到几分钟）期间
+    连接完全静默，反向代理会按「静默超时」掐断——Cloudflare
+    免费版是 100 秒，前端只能看到 524，误以为是模型出错。
+
+    事件类型::
+
+        event: delta   data: {"text": "..."}      增量文本
+        event: done    data: {<最终解析结果>}      完成，含 is_complete 等
+        event: error   data: {"detail": "..."}    出错
+
+    业务逻辑与 ``converse`` 完全一致，仅把「等待」换成「推送」。
+    """
+    novel_service = NovelService(session)
+    prompt_service = PromptService(session)
+    llm_service = LLMService(session)
+
+    project = await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    history_records = await novel_service.list_conversations(project_id)
+    logger.info(
+        "项目 %s 概念对话(流式)请求，用户 %s，历史记录 %s 条",
+        project_id,
+        current_user.id,
+        len(history_records),
+    )
+    conversation_history = [
+        {"role": record.role, "content": record.content} for record in history_records
+    ]
+    user_content = json.dumps(request.user_input, ensure_ascii=False)
+    conversation_history.append({"role": "user", "content": user_content})
+
+    system_prompt = _ensure_prompt(await prompt_service.get_prompt("concept"), "concept")
+    system_prompt = f"{system_prompt}\n{JSON_RESPONSE_INSTRUCTION}"
+
+    async def event_stream():
+        buffer: List[str] = []
+        try:
+            async for chunk in llm_service.stream_llm_response(
+                system_prompt=system_prompt,
+                conversation_history=conversation_history,
+                temperature=0.8,
+                user_id=current_user.id,
+                timeout=240.0,
+                model=request.model,
+            ):
+                buffer.append(chunk)
+                yield _sse("delta", {"text": chunk})
+        except HTTPException as exc:
+            # 上游错误（模型不存在、余额不足、超时…）以事件形式下发，
+            # 此时响应头已经发出，不可能再改 HTTP 状态码。
+            logger.warning("概念对话(流式)失败: project=%s detail=%s", project_id, exc.detail)
+            yield _sse("error", {"detail": str(exc.detail), "status": exc.status_code})
+            return
+        except Exception as exc:  # noqa: BLE001 - 兜底，避免中断后无提示
+            logger.exception("概念对话(流式)异常: project=%s", project_id)
+            yield _sse("error", {"detail": f"概念对话失败：{exc}"})
+            return
+
+        raw = remove_think_tags("".join(buffer))
+        try:
+            normalized = unwrap_markdown_json(raw)
+            sanitized = sanitize_json_like_text(normalized)
+            parsed = json.loads(sanitized)
+        except json.JSONDecodeError as exc:
+            logger.exception(
+                "流式概念对话解析失败: project_id=%s error=%s\n原文: %s",
+                project_id,
+                exc,
+                raw[:1000],
+            )
+            yield _sse("error", {"detail": f"AI 返回的内容格式不正确，请重试。错误详情: {exc}"})
+            return
+
+        try:
+            await novel_service.append_conversation(project_id, "user", user_content)
+            await novel_service.append_conversation(project_id, "assistant", normalized)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("流式概念对话落库失败: project=%s", project_id)
+            yield _sse("error", {"detail": f"对话保存失败：{exc}"})
+            return
+
+        if parsed.get("is_complete"):
+            parsed["ready_for_blueprint"] = True
+        parsed.setdefault("conversation_state", parsed.get("conversation_state", {}))
+
+        logger.info("项目 %s 概念对话(流式)完成，is_complete=%s",
+                    project_id, parsed.get("is_complete"))
+        yield _sse("done", parsed)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            # 关掉各级缓冲，确保首个字立刻到达浏览器——
+            # 这是让反向代理不按「静默超时」掐断的关键。
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/{project_id}/blueprint/generate", response_model=BlueprintGenerationResponse)

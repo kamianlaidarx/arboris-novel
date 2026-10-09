@@ -148,6 +148,10 @@ const completedBlueprint = ref<Blueprint | null>(null)
 const confirmationMessage = ref('')
 const blueprintMessage = ref('')
 const chatArea = ref<HTMLElement>()
+/** 流式输出期间，正在被填充的 AI 气泡下标；null 表示当前没有流式进行中 */
+const streamingIndex = ref<number | null>(null)
+/** 用户通过右上角切换器选定的模型；空串表示使用后端的活跃模型 */
+const selectedModel = ref('')
 
 const goBack = () => {
   router.push('/')
@@ -156,10 +160,12 @@ const goBack = () => {
 /**
  * 切换模型后的回调。
  *
- * 模型名由后端持久化为「活跃模型」，后续请求会自动使用它，
- * 所以这里只需给用户一个可见反馈，不需要改动对话状态。
+ * 模型由后端持久化为「活跃模型」，但这里同时记在本地，
+ * 让下一次请求显式带上——避免用户切完模型后，
+ * 第一个请求仍用旧的活跃值（多实例/缓存场景下会不一致）。
  */
 const onModelChanged = (model: string) => {
+  selectedModel.value = model
   chatMessages.value.push({
     content: `已切换到模型「${model}」，后续对话将使用该模型。`,
     type: 'ai',
@@ -178,6 +184,7 @@ const resetInspirationMode = () => {
   completedBlueprint.value = null
   confirmationMessage.value = ''
   blueprintMessage.value = ''
+  streamingIndex.value = null
   
   // 清空 store 中的当前项目和对话状态
   novelStore.setCurrentProject(null)
@@ -280,18 +287,39 @@ const handleUserInput = async (userInput: any) => {
       await scrollToBottom()
     }
 
-    const response = await novelStore.sendConversation(userInput)
+    const response = await novelStore.sendConversation(userInput, {
+      model: selectedModel.value || undefined,
+      // 边收边显示：先占一个 AI 气泡，增量文本往里填。
+      // 这样用户 1~2 秒内就能看到字，而不是盯着转圈等到全部生成完。
+      onDelta: (text: string) => {
+        if (streamingIndex.value === null) {
+          chatMessages.value.push({ content: '', type: 'ai' })
+          streamingIndex.value = chatMessages.value.length - 1
+        }
+        const msg = chatMessages.value[streamingIndex.value]
+        if (msg) msg.content += text
+        void scrollToBottom()
+      }
+    })
 
     // 首次加载完成后，关闭加载动画
     if (isInitialLoading.value) {
       isInitialLoading.value = false
     }
 
-    // 添加AI回复到聊天记录
-    chatMessages.value.push({
-      content: response.ai_message,
-      type: 'ai'
-    })
+    if (streamingIndex.value !== null) {
+      // 流式期间显示的是模型原始输出（带 JSON 结构），
+      // 用最终的 ai_message 覆盖它，保证界面干净。
+      const msg = chatMessages.value[streamingIndex.value]
+      if (msg) msg.content = response.ai_message
+      streamingIndex.value = null
+    } else {
+      // 没有收到任何增量（例如极短回复），退化为一次性追加
+      chatMessages.value.push({
+        content: response.ai_message,
+        type: 'ai'
+      })
+    }
     currentTurn.value++
 
     await scrollToBottom()
@@ -309,6 +337,15 @@ const handleUserInput = async (userInput: any) => {
     }
   } catch (error) {
     console.error('对话失败:', error)
+    // 流式中途失败：保留已收到的部分文字并标注中断，
+    // 比整段消失更有助于判断是超时还是别的错误。
+    if (streamingIndex.value !== null) {
+      const msg = chatMessages.value[streamingIndex.value]
+      if (msg && msg.content) {
+        msg.content += '\n\n（生成中断，以上为已收到的部分内容）'
+      }
+      streamingIndex.value = null
+    }
     // 确保在出错时也停止初始加载状态
     if (isInitialLoading.value) {
       isInitialLoading.value = false

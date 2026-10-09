@@ -87,17 +87,23 @@ export const useNovelStore = defineStore('novel', () => {
     }
   }
 
-  async function sendConversation(userInput: any): Promise<ConverseResponse> {
+  async function sendConversation(
+    userInput: any,
+    options: { model?: string; onDelta?: (text: string) => void } = {}
+  ): Promise<ConverseResponse> {
     isLoading.value = true
     error.value = null
     try {
       if (!currentProject.value) {
         throw new Error('没有当前项目')
       }
-      const response = await NovelAPI.converseConcept(
+      // 走流式端点：长生成期间连接不再静默，
+      // 避免被反向代理按静默超时掐断（Cloudflare 免费版 100 秒）。
+      const response = await NovelAPI.converseConceptStream(
         currentProject.value.id,
         userInput,
-        currentConversationState.value
+        currentConversationState.value,
+        { model: options.model, onDelta: options.onDelta }
       )
       currentConversationState.value = response.conversation_state
       return response

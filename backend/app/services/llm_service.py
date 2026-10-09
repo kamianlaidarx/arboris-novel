@@ -1,7 +1,7 @@
 # AIMETA P=LLM服务_大模型调用封装|R=API调用_流式生成|NR=不含业务逻辑|E=LLMService|X=internal|A=服务类|D=openai,httpx|S=net|RD=./README.ai
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 from fastapi import HTTPException, status
@@ -329,6 +329,76 @@ class LLMService:
             len(full_response),
         )
         return full_response
+
+    async def stream_llm_response(
+        self,
+        *,
+        system_prompt: str,
+        conversation_history: List[Dict[str, str]],
+        temperature: float = 0.7,
+        user_id: Optional[int] = None,
+        timeout: float = 300.0,
+        response_format: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        model: Optional[str] = None,
+    ) -> AsyncIterator[str]:
+        """逐块产出模型输出，而不是攒完再返回。
+
+        用途：让 HTTP 层能边生成边推给客户端（SSE），使首字节在
+        1~2 秒内发出。这样反向代理针对「静默连接」的超时（例如
+        Cloudflare 免费版的 100 秒）就不会掐断长生成。
+
+        与 ``_stream_and_collect`` 仅差在「是否累积」，错误处理完全一致。
+        """
+        config = await self._resolve_llm_config(user_id, model_override=model)
+        client = LLMClient(api_key=config["api_key"], base_url=config.get("base_url"))
+        effective_timeout = min(float(timeout), float(settings.llm_generation_timeout))
+        chat_messages = [
+            ChatMessage(role="system", content=system_prompt),
+            *[ChatMessage(role=m["role"], content=m["content"]) for m in conversation_history],
+        ]
+
+        logger.info(
+            "Streaming LLM response (incremental): model=%s user_id=%s messages=%d",
+            config.get("model"),
+            user_id,
+            len(chat_messages),
+        )
+
+        try:
+            async for part in client.stream_chat(
+                messages=chat_messages,
+                model=config.get("model"),
+                temperature=temperature,
+                timeout=int(effective_timeout),
+                response_format=response_format,
+                max_tokens=max_tokens,
+            ):
+                content = part.get("content")
+                if content:
+                    yield content
+        except InternalServerError as exc:
+            detail = _upstream_error_detail(exc, "AI 服务内部错误，请稍后重试")
+            logger.error("LLM stream internal error: model=%s detail=%s",
+                         config.get("model"), detail, exc_info=exc)
+            raise HTTPException(status_code=503, detail=detail)
+        except APIStatusError as exc:
+            status_code, detail = _classify_upstream_status(exc, config.get("model"))
+            logger.error("LLM stream rejected: model=%s status=%s detail=%s",
+                         config.get("model"), getattr(exc, "status_code", None), detail)
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+        except (httpx.RemoteProtocolError, httpx.ReadTimeout, APIConnectionError, APITimeoutError) as exc:
+            if isinstance(exc, httpx.RemoteProtocolError):
+                detail = "AI 服务连接被意外中断，请稍后重试"
+            elif isinstance(exc, (httpx.ReadTimeout, APITimeoutError)):
+                detail = "AI 服务响应超时，请稍后重试"
+            else:
+                detail = "无法连接到 AI 服务，请稍后重试"
+            logger.error("LLM stream failed: model=%s detail=%s",
+                         config.get("model"), detail, exc_info=exc)
+            raise HTTPException(status_code=503, detail=detail) from exc
+
+        await self.usage_service.increment("api_request_count")
 
     async def _resolve_llm_config(
         self,
