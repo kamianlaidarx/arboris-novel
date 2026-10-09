@@ -9,6 +9,11 @@ README.md
 LICENSE
 CHANGELOG.md
 docs/
+# The bare `*.md` above also matched backend/prompts/*.md, which are runtime
+# data rather than docs: init_db seeds the prompt table from them. Without the
+# exception below the image ships with an empty prompts dir, the seeding loop
+# finds no files, and every generation fails with "缺少写作提示词".
+!backend/prompts/*.md
 
 # CI/CD
 .github/

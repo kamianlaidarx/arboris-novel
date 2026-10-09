@@ -11,9 +11,9 @@ RUN npm config set registry https://registry.npmmirror.com
 # 复制前端依赖文件
 COPY frontend/package*.json ./
 
-RUN npm install
-
-# 安装前端依赖
+# 只用 npm ci：它按 package-lock.json 做可复现安装。
+# 这里原本同时有 `npm install` 和 `npm ci`，后者会在前者装好之后
+# 删掉 node_modules 重装，纯属浪费一层构建时间（且 npm ci 要求干净状态）。
 RUN npm ci --prefer-offline --no-audit
 
 # 复制前端源码
