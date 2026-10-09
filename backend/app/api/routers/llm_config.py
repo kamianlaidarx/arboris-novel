@@ -26,6 +26,13 @@ from ...schemas.llm_config import (
     ModelListResponse,
     ProviderInfoRead,
 )
+from ...schemas.user_model import (
+    UserModelActivate,
+    UserModelBulkCreate,
+    UserModelCreate,
+    UserModelListResponse,
+    UserModelRead,
+)
 from ...schemas.user import UserInDB
 from ...services.llm_config_service import LLMConfigService
 
@@ -152,3 +159,162 @@ async def list_models(
         result.cached,
     )
     return service.to_response(result)
+
+
+# ============================================================
+# 用户多模型切换
+#
+# 设计意图：同一网关下的多个模型共用一套凭据（url + api_key），
+# 因此这里只管理「模型名」这一个维度，凭据仍由 /api/llm-config 维护。
+# ============================================================
+
+
+def get_user_model_service(session: AsyncSession = Depends(get_session)):
+    from ...services.user_model_service import UserModelService
+
+    return UserModelService(session)
+
+
+@router.get("/my-models", response_model=UserModelListResponse)
+async def list_my_models(
+    service=Depends(get_user_model_service),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """列出当前用户收藏的可切换模型。
+
+    首次调用会自动把旧的单模型配置迁移进来，保证升级后不掉配置。
+    """
+    models = await service.list_models(current_user.id)
+    active = next((m.model_name for m in models if m.is_active), None)
+    return UserModelListResponse(
+        models=[
+            UserModelRead(
+                id=m.id,
+                model_name=m.model_name,
+                display_name=m.display_name,
+                is_active=m.is_active,
+                sort_order=m.sort_order,
+                note=m.note,
+            )
+            for m in models
+        ],
+        active_model=active,
+    )
+
+
+@router.post("/my-models", response_model=UserModelRead, status_code=status.HTTP_201_CREATED)
+async def add_my_model(
+    payload: UserModelCreate,
+    service=Depends(get_user_model_service),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """添加一个可选模型（已存在则幂等返回）。"""
+    record = await service.add_model(
+        current_user.id,
+        payload.model_name,
+        display_name=payload.display_name,
+        note=payload.note,
+        make_active=payload.make_active,
+    )
+    await service.session.commit()
+    return UserModelRead.model_validate(record)
+
+
+@router.post("/my-models/bulk", response_model=UserModelListResponse)
+async def bulk_add_my_models(
+    payload: UserModelBulkCreate,
+    service=Depends(get_user_model_service),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """批量添加模型（用于把网关返回的列表一键加入）。"""
+    await service.add_models(current_user.id, payload.model_names)
+    await service.session.commit()
+    models = await service.list_models(current_user.id)
+    return UserModelListResponse(
+        models=[
+            UserModelRead(
+                id=m.id,
+                model_name=m.model_name,
+                display_name=m.display_name,
+                is_active=m.is_active,
+                sort_order=m.sort_order,
+                note=m.note,
+            )
+            for m in models
+        ],
+        active_model=next((m.model_name for m in models if m.is_active), None),
+    )
+
+
+@router.put("/my-models/active", response_model=UserModelListResponse)
+async def activate_my_model(
+    payload: UserModelActivate,
+    service=Depends(get_user_model_service),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """切换当前使用的模型。
+
+    支持按 id 或按名称切换；按名称且该模型尚未收藏时会自动加入列表，
+    这样前端切换器可以直接输入任意模型名而不用先「添加」。
+    """
+    if payload.model_id is not None:
+        ok = await service.set_active(current_user.id, payload.model_id)
+    elif payload.model_name:
+        ok = await service.set_active_by_name(current_user.id, payload.model_name)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="需要提供 model_id 或 model_name",
+        )
+
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模型不存在")
+
+    await service.session.commit()
+    models = await service.list_models(current_user.id)
+    return UserModelListResponse(
+        models=[
+            UserModelRead(
+                id=m.id,
+                model_name=m.model_name,
+                display_name=m.display_name,
+                is_active=m.is_active,
+                sort_order=m.sort_order,
+                note=m.note,
+            )
+            for m in models
+        ],
+        active_model=next((m.model_name for m in models if m.is_active), None),
+    )
+
+
+@router.delete("/my-models/{model_id}", response_model=UserModelListResponse)
+async def remove_my_model(
+    model_id: int,
+    service=Depends(get_user_model_service),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """从收藏列表移除一个模型。
+
+    若移除的是当前活跃模型，会自动把列表里的下一个设为活跃。
+    """
+    ok = await service.remove_model(current_user.id, model_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模型不存在")
+    await service.session.commit()
+
+    models = await service.list_models(current_user.id)
+    return UserModelListResponse(
+        models=[
+            UserModelRead(
+                id=m.id,
+                model_name=m.model_name,
+                display_name=m.display_name,
+                is_active=m.is_active,
+                sort_order=m.sort_order,
+                note=m.note,
+            )
+            for m in models
+        ],
+        active_model=next((m.model_name for m in models if m.is_active), None),
+    )

@@ -173,6 +173,108 @@ export const deleteLLMConfig = async (): Promise<void> => {
   }
 }
 
+/* ============================================================
+ * 多模型切换
+ *
+ * 凭据（url + api_key）来自 /api/llm-config；
+ * 这里只管理「可以切换哪些模型」以及「当前是哪个」。
+ * ============================================================ */
+
+export interface UserModel {
+  id: number
+  model_name: string
+  display_name: string | null
+  is_active: boolean
+  sort_order: number
+  note: string | null
+}
+
+export interface UserModelList {
+  models: UserModel[]
+  active_model: string | null
+}
+
+const MODELS_BASE = `${LLM_BASE}/my-models`
+
+/** 读取可切换模型列表（首次调用会自动迁移旧的单模型配置）。 */
+export const listMyModels = async (): Promise<UserModelList> => {
+  const response = await fetch(MODELS_BASE, { headers: getHeaders() })
+  if (!response.ok) {
+    throw new Error('获取模型列表失败')
+  }
+  return response.json()
+}
+
+/** 添加一个可选模型。 */
+export const addMyModel = async (
+  modelName: string,
+  options: { displayName?: string; note?: string; makeActive?: boolean } = {},
+): Promise<UserModel> => {
+  const response = await fetch(MODELS_BASE, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({
+      model_name: modelName,
+      display_name: options.displayName ?? null,
+      note: options.note ?? null,
+      make_active: options.makeActive ?? false,
+    }),
+  })
+  if (!response.ok) {
+    throw new Error('添加模型失败')
+  }
+  return response.json()
+}
+
+/** 批量添加（把网关返回的模型一次加入列表）。 */
+export const bulkAddMyModels = async (modelNames: string[]): Promise<UserModelList> => {
+  const response = await fetch(`${MODELS_BASE}/bulk`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ model_names: modelNames }),
+  })
+  if (!response.ok) {
+    throw new Error('批量添加模型失败')
+  }
+  return response.json()
+}
+
+/**
+ * 切换当前模型。
+ *
+ * 传 modelName 时若该模型尚未收藏，后端会自动加入列表——
+ * 这样切换器可以直接输入任意模型名。
+ */
+export const activateMyModel = async (payload: {
+  modelId?: number
+  modelName?: string
+}): Promise<UserModelList> => {
+  const response = await fetch(`${MODELS_BASE}/active`, {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify({
+      model_id: payload.modelId ?? null,
+      model_name: payload.modelName ?? null,
+    }),
+  })
+  if (!response.ok) {
+    throw new Error('切换模型失败')
+  }
+  return response.json()
+}
+
+/** 从列表移除一个模型。 */
+export const removeMyModel = async (modelId: number): Promise<UserModelList> => {
+  const response = await fetch(`${MODELS_BASE}/${modelId}`, {
+    method: 'DELETE',
+    headers: getHeaders(),
+  })
+  if (!response.ok) {
+    throw new Error('移除模型失败')
+  }
+  return response.json()
+}
+
 /** 获取内置供应商预设。失败时返回空数组，不影响主流程。 */
 export const getProviderPresets = async (): Promise<ProviderPreset[]> => {
   try {

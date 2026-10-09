@@ -178,6 +178,7 @@ async def converse_with_concept(
         temperature=0.8,
         user_id=current_user.id,
         timeout=240.0,
+        model=request.model,
     )
     llm_response = remove_think_tags(llm_response)
 

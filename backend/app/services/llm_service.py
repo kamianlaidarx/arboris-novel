@@ -47,6 +47,7 @@ class LLMService:
         response_format: Optional[str] = "json_object",
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
+        model: Optional[str] = None,
     ) -> str:
         messages = [{"role": "system", "content": system_prompt}, *conversation_history]
         return await self._stream_and_collect(
@@ -57,6 +58,7 @@ class LLMService:
             response_format=response_format,
             max_tokens=max_tokens,
             top_p=top_p,
+            model=model,
         )
 
     async def generate(
@@ -70,6 +72,7 @@ class LLMService:
         max_tokens: Optional[int] = None,
         response_format: Optional[str] = None,
         top_p: Optional[float] = None,
+        model: Optional[str] = None,
     ) -> str:
         """兼容旧版接口的文本生成入口，统一走 get_llm_response。"""
         return await self.get_llm_response(
@@ -81,6 +84,7 @@ class LLMService:
             response_format=response_format,
             max_tokens=max_tokens,
             top_p=top_p,
+            model=model,
         )
 
     async def get_summary(
@@ -114,8 +118,9 @@ class LLMService:
         response_format: Optional[str] = None,
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
+        model: Optional[str] = None,
     ) -> str:
-        config = await self._resolve_llm_config(user_id)
+        config = await self._resolve_llm_config(user_id, model_override=model)
         client = LLMClient(api_key=config["api_key"], base_url=config.get("base_url"))
 
         chat_messages = [ChatMessage(role=msg["role"], content=msg["content"]) for msg in messages]
@@ -221,14 +226,34 @@ class LLMService:
         )
         return full_response
 
-    async def _resolve_llm_config(self, user_id: Optional[int]) -> Dict[str, Optional[str]]:
+    async def _resolve_llm_config(
+        self,
+        user_id: Optional[int],
+        model_override: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        """解析本次调用要用的凭据与模型。
+
+        优先级（``model_override`` 只影响 model 字段，不影响凭据来源）：
+            1. ``model_override``       —— 前端切换器指定的模型
+            2. 用户活跃模型             —— user_llm_models 里 is_active=1
+            3. 旧单模型配置             —— llm_configs.llm_provider_model
+            4. 系统默认                 —— system_configs 的 llm.model
+
+        凭据（url + api_key）始终取自 llm_configs（用户级）或系统配置，
+        因为同一网关下的多个模型共用一套凭据。
+        """
+        requested = (model_override or "").strip() or None
+
         if user_id:
             config = await self.llm_repo.get_by_user(user_id)
             if config and config.llm_provider_api_key:
+                model = requested or await self._active_model_for(user_id)
+                if not model:
+                    model = config.llm_provider_model
                 return {
                     "api_key": config.llm_provider_api_key,
                     "base_url": config.llm_provider_url,
-                    "model": config.llm_provider_model,
+                    "model": model,
                 }
 
         # 检查每日使用次数限制
@@ -237,7 +262,11 @@ class LLMService:
 
         api_key = await self._get_config_value("llm.api_key")
         base_url = await self._get_config_value("llm.base_url")
-        model = await self._get_config_value("llm.model")
+        model = requested
+        if not model and user_id:
+            model = await self._active_model_for(user_id)
+        if not model:
+            model = await self._get_config_value("llm.model")
 
         if not api_key:
             logger.error("未配置默认 LLM API Key，且用户 %s 未设置自定义 API Key", user_id)
@@ -247,6 +276,16 @@ class LLMService:
             )
 
         return {"api_key": api_key, "base_url": base_url, "model": model}
+
+    async def _active_model_for(self, user_id: int) -> Optional[str]:
+        """取用户当前活跃模型；出错时返回 None 让调用方走回退链。"""
+        try:
+            from .user_model_service import UserModelService
+
+            return await UserModelService(self.session).get_active_model(user_id)
+        except Exception as exc:  # 多模型表不可用不应阻断生成
+            logger.warning("读取活跃模型失败，回退到默认: user=%s error=%s", user_id, exc)
+            return None
 
     async def get_embedding(
         self,

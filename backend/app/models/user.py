@@ -30,3 +30,7 @@ class User(Base):
     # 关系映射
     novel_projects: Mapped[list["NovelProject"]] = relationship("NovelProject", back_populates="owner")
     llm_config: Mapped[Optional["LLMConfig"]] = relationship("LLMConfig", back_populates="user", uselist=False)
+    # 用户收藏的可切换模型（1:N）
+    llm_models: Mapped[list["UserLLMModel"]] = relationship(
+        "UserLLMModel", back_populates="user", cascade="all, delete-orphan"
+    )

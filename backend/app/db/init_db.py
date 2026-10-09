@@ -145,6 +145,16 @@ async def _ensure_schema_updates() -> None:
                 sync_conn.execute(
                     text("ALTER TABLE foreshadowings ADD COLUMN is_overdue BOOLEAN DEFAULT 0")
                 )
+
+            # 多模型切换：llm_configs 需要补「是否已迁移模型」标记位
+            llm_columns = {col["name"] for col in inspector.get_columns("llm_configs")}
+            if "llm_models_seeded" not in llm_columns:
+                sync_conn.execute(
+                    text(
+                        "ALTER TABLE llm_configs "
+                        "ADD COLUMN llm_models_seeded BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
         await conn.run_sync(_upgrade)
 
 

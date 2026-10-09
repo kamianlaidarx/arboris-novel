@@ -35,6 +35,10 @@ class ConverseRequest(BaseModel):
 
     user_input: Dict[str, Any]
     conversation_state: Dict[str, Any]
+    #: 可选：本次对话使用的模型。不传则用用户的活跃模型。
+    model: Optional[str] = Field(
+        default=None, description="本次请求使用的模型名；留空则用当前活跃模型"
+    )
 
 
 class ChapterGenerationStatus(str, Enum):

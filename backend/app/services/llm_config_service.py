@@ -60,6 +60,19 @@ class LLMConfigService:
         else:
             instance = LLMConfig(user_id=user_id, **data)
             await self.repo.add(instance)
+
+        # 保存配置时把模型同步进「可切换模型」列表。
+        # 放在这里而不是读取时，是为了让「用户删光列表」这个意图被尊重：
+        # 读取时播种会导致删掉的旧模型每次都被重新加回来。
+        try:
+            from .user_model_service import UserModelService
+
+            model_name = (data.get("llm_provider_model") or "").strip()
+            if model_name:
+                await UserModelService(self.session).add_model(user_id, model_name)
+        except Exception as exc:  # 同步失败不应让保存配置失败
+            logger.warning("同步模型到可切换列表失败: user=%s error=%s", user_id, exc)
+
         await self.session.commit()
         await self.session.refresh(instance)
         return LLMConfigRead.model_validate(instance)

@@ -42,6 +42,7 @@
               <span v-if="currentTurn > 0" class="text-sm font-medium text-gray-500 bg-gray-100 px-2 py-1 rounded-md">
                 第 {{ currentTurn }} 轮
               </span>
+              <ModelSwitcher @changed="onModelChanged" />
               <button
                 @click="handleRestart"
                 title="重新开始"
@@ -124,6 +125,7 @@ import ConversationInput from '@/components/ConversationInput.vue'
 import BlueprintConfirmation from '@/components/BlueprintConfirmation.vue'
 import BlueprintDisplay from '@/components/BlueprintDisplay.vue'
 import InspirationLoading from '@/components/InspirationLoading.vue'
+import ModelSwitcher from '@/components/ModelSwitcher.vue'
 import { globalAlert } from '@/composables/useAlert'
 
 interface ChatMessage {
@@ -149,6 +151,19 @@ const chatArea = ref<HTMLElement>()
 
 const goBack = () => {
   router.push('/')
+}
+
+/**
+ * 切换模型后的回调。
+ *
+ * 模型名由后端持久化为「活跃模型」，后续请求会自动使用它，
+ * 所以这里只需给用户一个可见反馈，不需要改动对话状态。
+ */
+const onModelChanged = (model: string) => {
+  chatMessages.value.push({
+    content: `已切换到模型「${model}」，后续对话将使用该模型。`,
+    type: 'ai',
+  })
 }
 
 // 清空所有状态，开始新的灵感对话

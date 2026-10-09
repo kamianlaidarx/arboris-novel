@@ -57,6 +57,9 @@ from .narrative_fact import NarrativeFact, FACT_TYPES, IMPORTANCE_LEVELS
 # 新增：章间交接契约（瞬时状态承接）
 from .chapter_contract import ChapterContract
 
+# 新增：用户多模型配置（全站模型切换）
+from .user_llm_model import UserLLMModel
+
 __all__ = [
     # 基础模型
     "AdminSetting",
@@ -103,4 +106,6 @@ __all__ = [
     "IMPORTANCE_LEVELS",
     # 章间交接契约
     "ChapterContract",
+    # 用户多模型配置
+    "UserLLMModel",
 ]
