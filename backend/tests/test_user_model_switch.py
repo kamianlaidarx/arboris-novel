@@ -280,3 +280,68 @@ async def test_system_model_overridden_by_active(session):
     resolved = await LLMService(session)._resolve_llm_config(1)
     assert resolved["api_key"] == "sys-key"
     assert resolved["model"] == "user-picked"
+
+
+# ==================================================== 事务边界（线上 bug 回归）
+
+async def test_seeding_survives_transaction_rollback(session):
+    """播种必须真正落库，而不是只在当前事务内可见。
+
+    线上表现：列表接口只 flush 不 commit，于是每次请求都重新播种一遍，
+    响应里能看到「迁移」出来的模型、库里却没有；删除后又会冒出来。
+
+    这里用「回滚后重新查询」模拟请求结束时的场景。
+    """
+    await _set_legacy_config(session, model="legacy-model")
+    svc = UserModelService(session)
+
+    models = await svc.list_models(1)
+    assert len(models) == 1, "首次读取应完成迁移"
+
+    await session.commit()
+
+    # 模拟「另一个请求」：新事务里重新读取
+    await session.rollback()
+    again = await svc.list_models(1)
+    assert len(again) == 1, "播种应已持久化，不应重复插入"
+    assert again[0].model_name == "legacy-model"
+
+    # 标记位也必须落库，否则下次还会再播一次
+    from app.models.llm_config import LLMConfig
+    from sqlalchemy import select
+
+    cfg = (
+        await session.execute(select(LLMConfig).where(LLMConfig.user_id == 1))
+    ).scalars().first()
+    assert cfg is not None and cfg.llm_models_seeded is True
+
+
+async def test_deleted_model_stays_deleted_across_requests(session):
+    """删掉播种出来的模型后，后续请求不应把它加回来。"""
+    await _set_legacy_config(session, model="legacy-model")
+    svc = UserModelService(session)
+
+    models = await svc.list_models(1)
+    await session.commit()
+    assert len(models) == 1
+
+    await svc.remove_model(1, models[0].id)
+    await session.commit()
+
+    # 新事务
+    await session.rollback()
+    assert await svc.list_models(1) == [], "删除后不应被重新播种"
+
+
+async def test_only_one_active_after_repeated_switches(session):
+    """反复切换后，任何时刻都只能有一个活跃模型。"""
+    svc = UserModelService(session)
+    await svc.add_models(1, ["m1", "m2", "m3"])
+    await session.commit()
+
+    for name in ("m2", "m3", "m1", "m2"):
+        await svc.set_active_by_name(1, name)
+        await session.commit()
+        all_models = await svc.list_models(1)
+        actives = [m.model_name for m in all_models if m.is_active]
+        assert actives == [name], f"切换 {name} 后活跃集合异常: {actives}"

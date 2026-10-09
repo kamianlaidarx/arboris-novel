@@ -185,6 +185,12 @@ async def list_my_models(
     首次调用会自动把旧的单模型配置迁移进来，保证升级后不掉配置。
     """
     models = await service.list_models(current_user.id)
+    # 必须提交：list_models 内部可能刚刚完成一次迁移播种。
+    # 只 flush 不 commit 的话，播种出来的行只在本请求内可见——
+    # 响应里能看到它，落库却没有，于是每次请求都"重新播种"一遍，
+    # 表现为删掉的模型反复出现、且能同时看到两个活跃模型。
+    await service.session.commit()
+
     active = next((m.model_name for m in models if m.is_active), None)
     return UserModelListResponse(
         models=[
