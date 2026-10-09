@@ -218,6 +218,12 @@ class LLMService:
         config = await self._resolve_llm_config(user_id, model_override=model)
         client = LLMClient(api_key=config["api_key"], base_url=config.get("base_url"))
 
+        # 把调用方给的超时收敛到全局上限。
+        # 上限默认 90 秒，低于 Cloudflare 免费版的 100 秒——
+        # 这样超时会由我们自己先触发，返回可读的中文提示，
+        # 而不是让请求挂到被 CF 以 524 掐断（用户只看到「未返回有效内容」）。
+        effective_timeout = min(float(timeout), float(settings.llm_generation_timeout))
+
         chat_messages = [ChatMessage(role=msg["role"], content=msg["content"]) for msg in messages]
 
         full_response = ""
@@ -235,7 +241,7 @@ class LLMService:
                 messages=chat_messages,
                 model=config.get("model"),
                 temperature=temperature,
-                timeout=int(timeout),
+                timeout=int(effective_timeout),
                 response_format=response_format,
                 max_tokens=max_tokens,
                 top_p=top_p,

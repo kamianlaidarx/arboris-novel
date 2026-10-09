@@ -43,6 +43,8 @@ services:
       LLM_MODEL_REQUEST_TIMEOUT: ${LLM_MODEL_REQUEST_TIMEOUT:-15}
       LLM_MODEL_MAX_RESULTS: ${LLM_MODEL_MAX_RESULTS:-2000}
       LLM_MODEL_VERIFY_TLS: ${LLM_MODEL_VERIFY_TLS:-true}
+      # 单次生成超时上限；Cloudflare 免费版前必须 <100，否则会被 524 掐断
+      LLM_GENERATION_TIMEOUT: ${LLM_GENERATION_TIMEOUT:-90}
       # 使用 Ollama / LM Studio / 内网自建网关时必须设为 true，否则会被安全开关拦截
       ALLOW_PRIVATE_LLM_ENDPOINTS: ${ALLOW_PRIVATE_LLM_ENDPOINTS:-false}
 

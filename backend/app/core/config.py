@@ -82,6 +82,17 @@ class Settings(BaseSettings):
         env="LLM_MODEL_REQUEST_TIMEOUT",
         description="自动获取第三方模型列表时的单次请求超时（秒）",
     )
+    llm_generation_timeout: float = Field(
+        default=90.0,
+        gt=0,
+        env="LLM_GENERATION_TIMEOUT",
+        description=(
+            "单次 LLM 生成请求的超时上限（秒）。用于兜住执行慢的模型，"
+            "避免请求一直挂到反向代理掐断。"
+            "若站点前面有 Cloudflare 免费版，必须小于 100 秒，"
+            "否则会先被 CF 以 524 掐断，用户看不到可读的错误。"
+        ),
+    )
     llm_model_cache_ttl: int = Field(
         default=300,
         ge=0,
