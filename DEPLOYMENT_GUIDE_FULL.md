@@ -243,6 +243,25 @@ bash deploy/scripts/verify_migration.sh
 | `OPENAI_MODEL_NAME` | 使用的模型 | `gpt-3.5-turbo` |
 | `WRITER_CHAPTER_VERSION_COUNT` | 章节生成版本数 | `2` |
 
+> `OPENAI_*` 只决定**默认**（系统级）模型配置。用户也可以在页面里配置自己的 Key：
+> 个人设置 → LLM 配置；管理员则可在后台 → 设置管理里直接改 `llm.api_key` /
+> `llm.base_url` / `llm.model`。详见 [模型发现文档](docs/model_discovery.md)。
+
+### 第三方模型列表自动获取
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `LLM_MODEL_CACHE_TTL` | 模型列表缓存秒数（0 关闭） | `300` |
+| `LLM_MODEL_CACHE_MAX_ENTRIES` | 缓存条目上限 | `128` |
+| `LLM_MODEL_REQUEST_TIMEOUT` | 单次请求超时（秒） | `15` |
+| `LLM_MODEL_MAX_RESULTS` | 单次返回模型数上限（0 不限） | `2000` |
+| `LLM_MODEL_VERIFY_TLS` | 是否校验第三方 TLS 证书 | `true` |
+| `ALLOW_PRIVATE_LLM_ENDPOINTS` | 允许 LLM 地址指向内网/回环 | `false` |
+
+> **使用 Ollama / LM Studio / 内网自建网关时，必须把 `ALLOW_PRIVATE_LLM_ENDPOINTS`
+> 设为 `true`**，否则这些地址会被安全开关拦截并返回 403。容器内访问宿主机服务
+> 请把地址写成 `http://host.docker.internal:端口`。
+
 ### 写作流程配置
 
 | 配置项 | 说明 | 默认值 |
