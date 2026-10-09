@@ -111,10 +111,39 @@ DB_PROVIDER=mysql docker compose up -d
 | `ADMIN_DEFAULT_PASSWORD` | ❌ | 管理员初始密码，部署后务必修改 |
 | `ALLOW_USER_REGISTRATION` | ❌ | 是否开放注册，默认 `false` |
 | `SMTP_SERVER` / `SMTP_USERNAME` | 开放注册时必填 | 邮件服务，用于发送验证码 |
+| `LLM_MODEL_CACHE_TTL` | ❌ | 模型列表缓存秒数，默认 `300`；设为 `0` 关闭缓存 |
+| `LLM_MODEL_REQUEST_TIMEOUT` | ❌ | 获取模型列表的单次请求超时，默认 `15` 秒 |
+| `ALLOW_PRIVATE_LLM_ENDPOINTS` | ❌ | 是否允许 LLM 地址指向内网（Ollama、自建网关需开启），默认 `false` |
 
 > **数据存储：** 默认 SQLite，数据在 Docker 卷中。需映射到本地时，在 `.env` 中设置 `SQLITE_STORAGE_SOURCE=./storage`。
 
 ---
+
+## 自动获取第三方大模型列表
+
+在「个人设置 → LLM 配置」中填写 API URL 与 API Key 后，点击 **获取模型** 即可自动拉取该服务
+支持的模型列表（也可手动输入任意模型名）。实现细节见 [模型发现文档](docs/model_discovery.md)。
+
+**支持的协议**
+
+| 协议 | 覆盖服务 |
+|------|----------|
+| OpenAI 兼容 `/v1/models` | OpenAI、DeepSeek、Moonshot、SiliconFlow、OpenRouter、Groq、Mistral、xAI、Together、阿里云百炼，以及各类第三方中转站与自建网关 |
+| Anthropic | Claude 官方 `/v1/models`（使用 `x-api-key` 头） |
+| Google Gemini | `/v1beta/models`，自动过滤不可生成的模型 |
+| Ollama | 本地 `/api/tags`（需开启 `ALLOW_PRIVATE_LLM_ENDPOINTS`） |
+
+**几个实用细节**
+
+- **地址不用写全**：填 `api.deepseek.com` 也会自动补成 `https://api.deepseek.com/v1`；
+  程序会按候选路径依次探测，命中真实端点后会在界面上显示出来。以 `#` 结尾表示固定该端点、不再自动补全路径。
+- **模型带能力标签**：返回的模型会按命名推断出「对话 / 推理 / 视觉 / 向量 / 重排 / 图像生成」等标签，
+  可在下拉框中按能力筛选。这只是命名启发式，不影响你手动输入任意模型名。
+- **失败会说清原因**：认证失败、限流、不提供列表接口、地址不通等情况会分别给出
+  明确提示与排查建议，并列出实际尝试过的端点。
+
+---
+
 
 ## 常见问题
 
@@ -127,7 +156,12 @@ A: 安装 Docker Desktop（Windows/Mac）或 Docker Engine（Linux），按上�
 A: 不会。密钥仅存在于服务端 `.env`，不向前端或用户暴露。
 
 **Q: 是否支持其他大模型？**  
-A: 支持。只要提供 OpenAI 兼容接口，在 `.env` 中配置 `OPENAI_API_BASE_URL` 即可。
+A: 支持。只要提供 OpenAI 兼容接口，在 `.env` 中配置 `OPENAI_API_BASE_URL` 即可；
+也可以在个人设置里配置自己的地址与 Key，并一键 **获取模型** 拉取可用模型列表。
+
+**Q: 点「获取模型」提示「该服务未提供模型列表接口」？**  
+A: 这通常不是故障——部分中转站与网关确实没有 `/v1/models` 端点。此时手动输入模型名即可
+（例如 `deepseek-chat`、`gpt-4o-mini`）。界面上会列出实际尝试过的端点，便于确认地址是否写对。
 
 **Q: 修改了代码如何参与？**  
 A: 欢迎提交 PR 或 Issue。

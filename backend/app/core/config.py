@@ -76,6 +76,40 @@ class Settings(BaseSettings):
         description="LLM API Base URL",
     )
     openai_model_name: str = Field(default="gpt-4o-mini", env="OPENAI_MODEL_NAME", description="默认 LLM 模型名称")
+    llm_model_request_timeout: float = Field(
+        default=15.0,
+        gt=0,
+        env="LLM_MODEL_REQUEST_TIMEOUT",
+        description="自动获取第三方模型列表时的单次请求超时（秒）",
+    )
+    llm_model_cache_ttl: int = Field(
+        default=300,
+        ge=0,
+        env="LLM_MODEL_CACHE_TTL",
+        description="模型列表缓存有效期（秒），设为 0 表示禁用缓存",
+    )
+    llm_model_cache_max_entries: int = Field(
+        default=128,
+        ge=1,
+        env="LLM_MODEL_CACHE_MAX_ENTRIES",
+        description="模型列表缓存的最大条目数",
+    )
+    llm_model_max_results: int = Field(
+        default=2000,
+        ge=0,
+        env="LLM_MODEL_MAX_RESULTS",
+        description="单次返回的模型数量上限，0 表示不限制",
+    )
+    llm_model_verify_tls: bool = Field(
+        default=True,
+        env="LLM_MODEL_VERIFY_TLS",
+        description="探测第三方模型列表时是否校验 TLS 证书（自签名网关可关闭）",
+    )
+    allow_private_llm_endpoints: bool = Field(
+        default=False,
+        env="ALLOW_PRIVATE_LLM_ENDPOINTS",
+        description="是否允许用户填写的 LLM 地址指向内网/回环地址（自建网关场景需开启）",
+    )
     writer_chapter_versions: int = Field(
         default=2,
         ge=1,

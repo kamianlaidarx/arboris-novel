@@ -1,0 +1,12 @@
+# AIMETA P=开发依赖_测试与静态检查|R=测试依赖声明|NR=不含运行时依赖|E=requirements-dev|X=internal|A=依赖清单|D=none|S=none|RD=./README.ai
+# 开发/测试依赖：
+#   pip install -r requirements-dev.txt
+#
+# 说明：requirements.txt 里的 asyncmy 仅 MySQL 场景需要，且需要本机具备编译环境。
+# 只跑测试（SQLite）时可以先用下面这条跳过它：
+#   grep -v '^asyncmy' requirements.txt > /tmp/reqs.txt && pip install -r /tmp/reqs.txt
+-r requirements.txt
+
+pytest>=8.3.4
+pytest-asyncio>=0.25.3
+pyflakes>=3.2.0
