@@ -51,6 +51,12 @@ from .foreshadowing import (
     ForeshadowingAnalysis,
 )
 
+# 新增：时序事实库（长篇一致性）
+from .narrative_fact import NarrativeFact, FACT_TYPES, IMPORTANCE_LEVELS
+
+# 新增：章间交接契约（瞬时状态承接）
+from .chapter_contract import ChapterContract
+
 __all__ = [
     # 基础模型
     "AdminSetting",
@@ -91,4 +97,10 @@ __all__ = [
     "ForeshadowingReminder",
     "ForeshadowingStatusHistory",
     "ForeshadowingAnalysis",
+    # 时序事实库
+    "NarrativeFact",
+    "FACT_TYPES",
+    "IMPORTANCE_LEVELS",
+    # 章间交接契约
+    "ChapterContract",
 ]
