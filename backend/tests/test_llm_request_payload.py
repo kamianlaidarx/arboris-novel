@@ -150,3 +150,68 @@ async def test_response_format_omitted_when_none(client):
     """response_format=None 时不应发送该字段（Gemini 系模型会因此报错）。"""
     await _collect(client, [ChatMessage("user", "hi")], response_format=None)
     assert "response_format" not in client._client.completions.captured
+
+
+# ==================================================== 对话必须以 user 结尾
+
+def test_requires_user_terminated_only_for_gemini():
+    """只有 Gemini 系需要补正；不要给别的厂商平白加一轮对话。"""
+    from app.utils.llm_tool import _requires_user_terminated
+
+    for m in ("gemini-3.8-flash", "gemini-3.7-flash", "models/gemini-pro", "GEMINI-3.8-FLASH"):
+        assert _requires_user_terminated(m) is True, m
+    for m in ("deepseek-v4.1-flash", "gpt-5.5", "gpt-6-sol", "claude-sonnet-4.5", None, ""):
+        assert _requires_user_terminated(m) is False, m
+
+
+def test_ensure_user_terminated_appends_after_assistant():
+    from app.utils.llm_tool import _ensure_user_terminated
+
+    msgs = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    out = _ensure_user_terminated(msgs)
+    assert len(out) == 3
+    assert out[-1]["role"] == "user"
+    assert out[:2] == msgs, "原有消息必须原样保留"
+
+
+def test_ensure_user_terminated_noop_when_already_user():
+    from app.utils.llm_tool import _ensure_user_terminated
+
+    msgs = [{"role": "user", "content": "a"}]
+    assert _ensure_user_terminated(msgs) == msgs
+
+
+def test_ensure_user_terminated_handles_empty():
+    from app.utils.llm_tool import _ensure_user_terminated
+
+    assert _ensure_user_terminated([]) == []
+
+
+async def test_gemini_request_is_user_terminated_end_to_end(client):
+    """核心回归：以 assistant 结尾的历史，发给 gemini 时必须被补正。
+
+    真实故障：生成蓝图把历史对话直接传下去，而历史末条常是 assistant，
+    Gemini 直接拒绝——400 Requests ending with a model turn are not supported.
+    """
+    history = [
+        ChatMessage("user", "修真"),
+        ChatMessage("assistant", "你想写什么？"),
+    ]
+    await _collect(client, history, model="gemini-3.8-flash")
+
+    sent = client._client.completions.captured["messages"]
+    assert sent[-1]["role"] == "user", "gemini 请求必须以 user 结尾"
+    assert len(sent) == 3
+
+
+async def test_non_gemini_request_is_left_alone(client):
+    """非 Gemini 模型不应被加料。"""
+    history = [
+        ChatMessage("user", "修真"),
+        ChatMessage("assistant", "你想写什么？"),
+    ]
+    await _collect(client, history, model="deepseek-v4.1-flash")
+
+    sent = client._client.completions.captured["messages"]
+    assert len(sent) == 2, "deepseek 不需要补正"
+    assert sent[-1]["role"] == "assistant"

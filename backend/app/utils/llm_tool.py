@@ -19,6 +19,40 @@ class ChatMessage:
         return asdict(self)
 
 
+#: 触发「必须以用户发言结尾」补正的模型名前缀。
+#: Gemini 系要求对话以 user turn 收尾，OpenAI / DeepSeek 无此限制。
+_USER_TERMINATED_MODEL_PREFIXES = ("gemini", "models/gemini")
+
+
+def _requires_user_terminated(model: Optional[str]) -> bool:
+    """该模型是否要求请求以 user 消息结尾。"""
+    name = (model or "").lower()
+    return name.startswith(_USER_TERMINATED_MODEL_PREFIXES)
+
+
+def _ensure_user_terminated(payload_messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """若最后一条是 assistant，补一条 user 消息。
+
+    Gemini 原生 API 会直接拒绝「以 model turn 结尾」的请求：
+
+        400 Requests ending with a model turn are not supported.
+
+    这在「拿历史对话直接生成蓝图」这类场景下必然触发——历史里最后一条
+    往往是 assistant 的回复，而调用方只是想让它基于整段历史产出结果，
+    并不会再追加一条用户消息。
+
+    补的内容刻意保持中性，避免影响生成意图。
+    """
+    if not payload_messages:
+        return payload_messages
+    if payload_messages[-1].get("role") == "assistant":
+        return [
+            *payload_messages,
+            {"role": "user", "content": "请根据以上对话继续。"},
+        ]
+    return payload_messages
+
+
 class LLMClient:
     """异步流式调用封装，兼容 OpenAI SDK。"""
 
@@ -40,9 +74,17 @@ class LLMClient:
         timeout: int = 120,
         **kwargs,
     ) -> AsyncGenerator[Dict[str, str], None]:
+        resolved_model = model or os.environ.get("MODEL", "gpt-3.5-turbo")
+        payload_messages = [msg.to_dict() for msg in messages]
+
+        # Gemini 系拒绝「以 model turn 结尾」的请求；其他厂商无此限制，
+        # 所以只在需要的模型上补正，避免给别的模型平白加一轮对话。
+        if _requires_user_terminated(resolved_model):
+            payload_messages = _ensure_user_terminated(payload_messages)
+
         payload = {
-            "model": model or os.environ.get("MODEL", "gpt-3.5-turbo"),
-            "messages": [msg.to_dict() for msg in messages],
+            "model": resolved_model,
+            "messages": payload_messages,
             "stream": True,
             **kwargs,
         }
