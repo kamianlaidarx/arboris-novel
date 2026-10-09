@@ -5,7 +5,13 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import HTTPException, status
-from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+)
 
 from ..core.config import settings
 from ..repositories.llm_config_repository import LLMConfigRepository
@@ -22,6 +28,95 @@ try:  # pragma: no cover - 运行环境未安装时兼容
     from ollama import AsyncClient as OllamaAsyncClient
 except ImportError:  # pragma: no cover - Ollama 为可选依赖
     OllamaAsyncClient = None
+
+
+def _extract_upstream_message(exc: Exception) -> Optional[str]:
+    """从上游错误响应里取出可读消息。
+
+    优先取 ``message_zh``（部分网关会返回中文），其次 ``message``。
+    取不到就返回 None，由调用方决定兜底文案。
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error_data = payload.get("error")
+    if not isinstance(error_data, dict):
+        # 有些网关直接把 message 放在顶层
+        top = payload.get("message")
+        return top if isinstance(top, str) and top else None
+    for key in ("message_zh", "message"):
+        value = error_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _classify_upstream_status(
+    exc: APIStatusError, model: Optional[str]
+) -> tuple[int, str]:
+    """把上游 HTTP 状态码翻译成「可操作」的中文提示。
+
+    返回 ``(对前端暴露的状态码, 提示文案)``。
+
+    重点是把**配置类错误**（模型名写错、key 无效、余额不足）与
+    真正的服务端故障区分开——前者用户自己就能修，后者只能等。
+    以前这两类都变成 500，用户完全看不出该做什么。
+    """
+    code = getattr(exc, "status_code", None)
+    upstream = _extract_upstream_message(exc)
+    model_hint = f"当前模型「{model}」" if model else "当前模型"
+
+    if code == 404:
+        return 400, (
+            f"{model_hint}在该服务上不存在（上游返回 404）。"
+            "请检查模型名是否拼写正确，或点击「从网关拉取可用模型」重新选择。"
+        )
+    if code == 401:
+        return 401, "AI 服务的 API Key 无效或已过期，请重新配置。"
+    if code == 403:
+        return 403, (
+            f"AI 服务拒绝了本次请求（403）{f'：{upstream}' if upstream else '，可能是 Key 权限不足或模型未开通。'}"
+        )
+    if code == 400:
+        # 余额不足也常以 400/402 出现，这里把上游原文带出来更有用
+        if upstream and ("balance" in upstream.lower() or "余额" in upstream or "quota" in upstream.lower()):
+            return 402, f"AI 服务账户余额不足：{upstream}"
+        return 400, (
+            f"AI 服务认为请求不合法（400）{f'：{upstream}' if upstream else '，请检查模型参数配置。'}"
+        )
+    if code == 402:
+        return 402, f"AI 服务账户余额不足{f'：{upstream}' if upstream else '，请充值后重试。'}"
+    if code == 422:
+        return 400, (
+            f"AI 服务无法处理该请求（422）{f'：{upstream}' if upstream else '，请检查模型参数。'}"
+        )
+    if code == 429:
+        return 429, "AI 服务限流（429），请稍后重试或降低请求频率。"
+    if code is not None and code >= 500:
+        return 503, f"AI 服务内部错误（{code}），请稍后重试。"
+
+    # 其余状态码：原样透传，附上游消息
+    return 502, (
+        f"AI 服务返回异常状态 {code}"
+        f"{f'：{upstream}' if upstream else '，请检查模型配置。'}"
+    )
+
+
+def _upstream_error_detail(exc: Exception, fallback: str) -> str:
+    """取上游错误消息，取不到则用兜底文案。
+
+    注意优先级：**兜底文案优先于 ``str(exc)``**。
+    OpenAI SDK 的 ``str(exc)`` 通常是 ``"upstream error"`` 这类
+    没有信息量的占位串，直接展示给用户还不如我们自己的中文提示。
+    所以只有在既没有上游消息、也没有兜底文案时才退回 ``str(exc)``。
+    """
+    return _extract_upstream_message(exc) or fallback or str(exc)
 
 
 class LLMService:
@@ -150,17 +245,7 @@ class LLMService:
                 if part.get("finish_reason"):
                     finish_reason = part["finish_reason"]
         except InternalServerError as exc:
-            detail = "AI 服务内部错误，请稍后重试"
-            response = getattr(exc, "response", None)
-            if response is not None:
-                try:
-                    payload = response.json()
-                    error_data = payload.get("error", {}) if isinstance(payload, dict) else {}
-                    detail = error_data.get("message_zh") or error_data.get("message") or detail
-                except Exception:
-                    detail = str(exc) or detail
-            else:
-                detail = str(exc) or detail
+            detail = _upstream_error_detail(exc, "AI 服务内部错误，请稍后重试")
             logger.error(
                 "LLM stream internal error: model=%s user_id=%s detail=%s",
                 config.get("model"),
@@ -169,6 +254,19 @@ class LLMService:
                 exc_info=exc,
             )
             raise HTTPException(status_code=503, detail=detail)
+        except APIStatusError as exc:
+            # 覆盖 400/401/403/404/409/422/429 等全部带状态码的上游错误。
+            # 之前只捕获了 InternalServerError，导致「模型名写错」这类
+            # 404 一路冒到 FastAPI 变成 500，用户只看到「服务器内部错误」，
+            # 完全看不出真正原因是配置问题。
+            status_code, detail = _classify_upstream_status(exc, config.get("model"))
+            logger.error(
+                "LLM stream rejected by upstream: model=%s status=%s detail=%s",
+                config.get("model"),
+                getattr(exc, "status_code", None),
+                detail,
+            )
+            raise HTTPException(status_code=status_code, detail=detail) from exc
         except (httpx.RemoteProtocolError, httpx.ReadTimeout, APIConnectionError, APITimeoutError) as exc:
             if isinstance(exc, httpx.RemoteProtocolError):
                 detail = "AI 服务连接被意外中断，请稍后重试"
