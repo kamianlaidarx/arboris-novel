@@ -41,7 +41,21 @@ class Foreshadowing(Base):
     target_reveal_chapter: Mapped[Optional[int]] = mapped_column(Integer)  # 计划揭示的章节
     reveal_method: Mapped[Optional[str]] = mapped_column(Text)  # 计划的揭示方式
     reveal_impact: Mapped[Optional[str]] = mapped_column(Text)  # 揭示后的影响
-    
+
+    # ---- 回收窗口与触发条件（长篇一致性）----
+    #: 最早可回收章节。没有它，一个被激励「尽快回收伏笔」的系统会在第 6 章
+    #: 解掉第 40 章的谜。有效回收窗口是 [earliest_payoff_chapter, target_reveal_chapter]。
+    earliest_payoff_chapter: Mapped[Optional[int]] = mapped_column(Integer)
+    #: **触发谓词**：写成可在章节大纲上做模式匹配的条件，而非描述性文字。
+    #: 例：「主角被困地窖 AND 已搜索过壁炉台」。
+    #: 这把「我有没有记得这把枪」从记忆问题变成确定性匹配问题。
+    trigger_condition: Mapped[Optional[str]] = mapped_column(Text)
+    #: 前置铺垫：必须先埋好的其他伏笔（名称或 id 列表）。
+    #: 表达「在读者看到 A 和 B 之前不能揭示 X」——悬疑写作里真正的约束。
+    required_hints: Mapped[Optional[list]] = mapped_column(JSON)
+    #: 是否已超期未回收（由扫描任务更新，避免每次查询都重算）。
+    is_overdue: Mapped[bool] = mapped_column(default=False)
+
     # 关联信息
     related_characters: Mapped[Optional[list]] = mapped_column(JSON)  # 相关角色
     related_plots: Mapped[Optional[list]] = mapped_column(JSON)  # 相关剧情线

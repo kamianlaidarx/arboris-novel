@@ -165,6 +165,21 @@ class PipelineOrchestrator:
 
         project_memory_text = await self._get_project_memory_text(project_id)
 
+        # 时序事实约束块：把「截至本章仍然成立的事实」作为硬约束注入。
+        # 这是长篇一致性的核心机制——它让「第 N 章某角色在哪/什么状态」
+        # 成为一条可精确查询的约束，而不是靠 2000 字滚动摘要去回忆。
+        facts_block = await self._get_facts_constraint_block(
+            project_id=project_id,
+            chapter_number=chapter_number,
+            involved_characters=introduced_characters,
+        )
+
+        # 章间交接契约：上一章结束时的瞬时状态（时间/地点/谁在做什么）。
+        # 与上一章结尾原文【并列】注入——契约供事实，原文供语感。
+        contract_block = await self._get_contract_block(
+            project_id=project_id, chapter_number=chapter_number
+        )
+
         rag_context = None
         knowledge_context = None
         rag_stats = None
@@ -210,6 +225,8 @@ class PipelineOrchestrator:
             forbidden_characters=forbidden_characters,
             project_memory_text=project_memory_text,
             memory_context=memory_context,
+            facts_block=facts_block,
+            contract_block=contract_block,
         )
 
         if enhanced_flow and enhanced_context:
@@ -368,6 +385,18 @@ class PipelineOrchestrator:
 
         if preset == "basic":
             config.enable_rag = True
+            # 默认打开伏笔追踪：把「已埋设但未回收的伏笔」注入提示词，降低伏笔断线。
+            #
+            # 注意这里的连带效果：该开关会激活整个 EnhancedWritingFlow
+            # （constitution / writer_persona / foreshadowing / faction 四项上下文），
+            # 其中 ensure_default_persona() 在项目还没有人格时会【创建并提交】
+            # 一条默认人格记录，并把 [小说宪法] [Writer 人格] [势力关系] 注入提示词。
+            # 这些都是只读上下文注入（除首次创建人格外不写业务数据），
+            # 但确实会改变生成结果，因此可由 flow_config["enable_foreshadowing"]=false 关闭。
+            #
+            # enable_consistency 仍默认关闭：它会调用 LLM 检查，并在发现
+            # CRITICAL/MAJOR 问题时【改写正文】，属于改变产出的行为，应由使用者显式开启。
+            config.enable_foreshadowing = True
 
         for key in (
             "enable_preview",
@@ -605,8 +634,7 @@ class PipelineOrchestrator:
             logger.warning("向量库初始化失败，跳过两层 RAG: %s", exc)
             return None, {"mode": "two_stage", "enabled": False, "error": str(exc)}
 
-        sync_session = getattr(self.session, "sync_session", self.session)
-        retrieval_service = KnowledgeRetrievalService(sync_session, self.llm_service, vector_store)
+        retrieval_service = KnowledgeRetrievalService(self.session, self.llm_service, vector_store)
         filtered = await retrieval_service.retrieve_and_filter(
             project_id=project_id,
             chapter_number=chapter_number,
@@ -647,6 +675,58 @@ class PipelineOrchestrator:
         memory_layer = MemoryLayerService(self.session, self.llm_service, self.prompt_service)
         return await memory_layer.get_memory_context(project_id, chapter_number, involved_characters)
 
+    async def _get_facts_constraint_block(
+        self,
+        *,
+        project_id: str,
+        chapter_number: int,
+        involved_characters: List[str],
+    ) -> Optional[str]:
+        """渲染「截至本章仍然成立的事实」约束块。
+
+        只取本章涉及的角色（``involved_characters``），避免把全书所有实体的
+        事实都塞进提示词——约束块本身也会变成上下文负担。
+        没有事实时返回 None，调用方会跳过该 prompt 区块。
+        """
+        from .fact_store import FactStore
+
+        try:
+            store = FactStore(self.session)
+            entities = [name for name in involved_characters if name] or None
+            block = await store.render_constraints(
+                project_id, chapter_number, entities=entities
+            )
+        except Exception as exc:  # 约束块失败不应阻断生成
+            logger.error(
+                "渲染事实约束块失败: project=%s chapter=%s error=%s",
+                project_id,
+                chapter_number,
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        return block or None
+
+    async def _get_contract_block(
+        self, *, project_id: str, chapter_number: int
+    ) -> Optional[str]:
+        """取上一章契约并渲染成 P0 承接块。"""
+        from .chapter_contract_service import ChapterContractService
+
+        try:
+            service = ChapterContractService(self.session, self.llm_service)
+            return await service.render_contract(project_id, chapter_number)
+        except Exception as exc:  # 契约失败不应阻断生成
+            logger.error(
+                "渲染章间契约失败: project=%s chapter=%s error=%s",
+                project_id,
+                chapter_number,
+                exc,
+                exc_info=True,
+            )
+            return None
+
     @staticmethod
     def _build_prompt_sections(
         *,
@@ -662,14 +742,23 @@ class PipelineOrchestrator:
         forbidden_characters: List[str],
         project_memory_text: Optional[str],
         memory_context: Optional[str],
+        facts_block: Optional[str] = None,
+        contract_block: Optional[str] = None,
     ) -> List[Tuple[str, str]]:
         blueprint_text = json.dumps(writer_blueprint, ensure_ascii=False, indent=2)
         mission_text = json.dumps(chapter_mission, ensure_ascii=False, indent=2) if chapter_mission else "无导演脚本"
         forbidden_text = json.dumps(forbidden_characters, ensure_ascii=False) if forbidden_characters else "无"
 
-        sections: List[Tuple[str, str]] = [
-            ("[世界蓝图](JSON，已裁剪)", blueprint_text),
-        ]
+        sections: List[Tuple[str, str]] = []
+
+        # P0：硬约束区块排在最前面，优先于所有叙事性上下文。
+        # 契约（瞬时状态）排在事实（持久状态）之前，因为承接错误是最直接可见的 bug。
+        if contract_block:
+            sections.append(("[上一章交接状态](必须承接)", contract_block))
+        if facts_block:
+            sections.append(("[事实约束](必须遵守，不得矛盾)", facts_block))
+
+        sections.append(("[世界蓝图](JSON，已裁剪)", blueprint_text))
 
         if project_memory_text:
             sections.append(("[项目长期记忆](摘要/剧情线)", project_memory_text))
@@ -1010,8 +1099,7 @@ class PipelineOrchestrator:
         chapter_text: str,
         user_id: int,
     ) -> Tuple[str, Dict[str, Any]]:
-        sync_session = getattr(self.session, "sync_session", self.session)
-        service = ConsistencyService(sync_session, self.llm_service)
+        service = ConsistencyService(self.session, self.llm_service)
         result = await service.check_consistency(project_id, chapter_text, user_id, include_foreshadowing=True)
         report = {
             "is_consistent": result.is_consistent,

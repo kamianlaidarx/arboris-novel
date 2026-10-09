@@ -55,6 +55,16 @@ class ForeshadowingTrackerService:
         }
         
         for fs in all_active:
+            # 回收窗口下界：早于 earliest_payoff_chapter 不得回收。
+            # 没有这道闸，一个被激励「尽快回收伏笔」的系统会在第 6 章
+            # 解掉第 40 章的谜——这是比「忘记回收」更伤读者的失败。
+            if (
+                fs.earliest_payoff_chapter is not None
+                and chapter_number < fs.earliest_payoff_chapter
+            ):
+                result["related"].append(fs)
+                continue
+
             # 检查紧迫度
             if fs.urgency and fs.urgency >= 8:
                 result["urgent"].append(fs)
@@ -67,6 +77,7 @@ class ForeshadowingTrackerService:
                     result["due_soon"].append(fs)
                     continue
                 elif chapters_until < 0:
+                    fs.is_overdue = True
                     result["overdue"].append(fs)
                     continue
             
@@ -74,6 +85,7 @@ class ForeshadowingTrackerService:
             if fs.chapter_number:
                 chapters_since = chapter_number - fs.chapter_number
                 if chapters_since >= 20:
+                    fs.is_overdue = True
                     result["overdue"].append(fs)
                     continue
             
@@ -150,6 +162,49 @@ class ForeshadowingTrackerService:
         await self.db.commit()
         await self.db.refresh(fs)
         return fs
+
+    async def match_triggers(
+        self,
+        project_id: str,
+        chapter_number: int,
+        chapter_context: str,
+    ) -> List[Foreshadowing]:
+        """找出**触发条件已在当前章节语境中满足**的伏笔。
+
+        这是把「我有没有记得这把枪」从记忆问题变成确定性匹配的关键：
+        ``trigger_condition`` 被写成可匹配的谓词（如「主角被困地窖 AND 已搜索过壁炉台」），
+        于是我们只需要把它拆成若干子串，逐条看是否出现在本章大纲/写作指令/检索上下文里。
+
+        刻意做成**保守的**：只做子串包含判断，命中数不足就返回空，
+        不做语义推断——宁可漏报（漏了还有到期提醒兜底），也不误报。
+        """
+        if not chapter_context or not chapter_context.strip():
+            return []
+
+        active = await self.get_active_foreshadowings(project_id)
+        haystack = chapter_context
+        matched: List[Foreshadowing] = []
+
+        for fs in active:
+            condition = (fs.trigger_condition or "").strip()
+            if not condition:
+                continue
+            # 早于回收窗口下界的，即使触发条件命中也不提示回收
+            if (
+                fs.earliest_payoff_chapter is not None
+                and chapter_number < fs.earliest_payoff_chapter
+            ):
+                continue
+
+            parts = _split_trigger_condition(condition)
+            if not parts:
+                continue
+            hits = sum(1 for part in parts if part in haystack)
+            # 要求全部子条件命中才认为触发——AND 语义
+            if hits == len(parts):
+                matched.append(fs)
+
+        return matched
 
     async def get_foreshadowing_reminders(
         self,
@@ -333,3 +388,32 @@ class ForeshadowingTrackerService:
             "status": status,
             "recommendations": recommendations
         }
+
+
+#: 触发谓词里连接子条件的记号（中英文都支持）
+_TRIGGER_SEPARATORS = (" AND ", " and ", "且", "并且", "&&", "+")
+
+
+def _split_trigger_condition(condition: str) -> List[str]:
+    """把触发谓词拆成子条件列表。
+
+    「主角被困地窖 AND 已搜索过壁炉台」→ ["主角被困地窖", "已搜索过壁炉台"]
+
+    拆分失败（没有分隔符）时返回整条作为唯一条件——这仍然比不匹配强，
+    因为它至少要求整句出现在语境里。
+    """
+    text = (condition or "").strip()
+    if not text:
+        return []
+
+    parts = [text]
+    for sep in _TRIGGER_SEPARATORS:
+        next_parts: List[str] = []
+        for part in parts:
+            next_parts.extend(part.split(sep))
+        parts = next_parts
+
+    cleaned = [p.strip() for p in parts if p and p.strip()]
+    # 过滤掉过短的碎片，避免 "的"、"了" 这类噪声造成误命中
+    cleaned = [p for p in cleaned if len(p) >= 2]
+    return cleaned
