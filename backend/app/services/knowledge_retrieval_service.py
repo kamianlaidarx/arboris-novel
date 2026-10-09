@@ -14,6 +14,8 @@ import logging
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from ..models.project_memory import ProjectMemory
@@ -168,7 +170,7 @@ class KnowledgeRetrievalService:
     
     def __init__(
         self,
-        db: Session,
+        db: AsyncSession,
         llm_service: LLMService,
         vector_store_service: Optional[VectorStoreService] = None
     ):
@@ -200,7 +202,7 @@ class KnowledgeRetrievalService:
             FilteredContext
         """
         # 1. 获取章节蓝图信息
-        blueprint = self._get_chapter_blueprint(project_id, chapter_number)
+        blueprint = await self._get_chapter_blueprint(project_id, chapter_number)
         
         # 2. 生成检索关键词
         queries = await self._generate_search_queries(
@@ -218,9 +220,10 @@ class KnowledgeRetrievalService:
         )
         
         # 4. 获取前文摘要
-        memory = self.db.query(ProjectMemory).filter(
-            ProjectMemory.project_id == project_id
-        ).first()
+        memory_result = await self.db.execute(
+            select(ProjectMemory).where(ProjectMemory.project_id == project_id)
+        )
+        memory = memory_result.scalars().first()
         global_summary = memory.global_summary if memory else ""
         
         # 5. 过滤和结构化
@@ -268,16 +271,17 @@ class KnowledgeRetrievalService:
         context = {}
         
         # 1. 获取项目记忆
-        memory = self.db.query(ProjectMemory).filter(
-            ProjectMemory.project_id == project_id
-        ).first()
+        memory_result = await self.db.execute(
+            select(ProjectMemory).where(ProjectMemory.project_id == project_id)
+        )
+        memory = memory_result.scalars().first()
         
         if memory:
             context["global_summary"] = memory.global_summary
             context["plot_arcs"] = memory.plot_arcs
         
         # 2. 获取章节蓝图
-        blueprint = self._get_chapter_blueprint(project_id, chapter_number)
+        blueprint = await self._get_chapter_blueprint(project_id, chapter_number)
         if blueprint:
             context["blueprint"] = {
                 "chapter_focus": blueprint.chapter_focus,
@@ -333,7 +337,7 @@ class KnowledgeRetrievalService:
         基于前文内容和章节蓝图，生成针对性的写作摘要。
         """
         # 获取章节蓝图
-        blueprint = self._get_chapter_blueprint(project_id, chapter_number)
+        blueprint = await self._get_chapter_blueprint(project_id, chapter_number)
         if not blueprint:
             return None
         
@@ -373,16 +377,19 @@ class KnowledgeRetrievalService:
             logger.error(f"生成章节摘要失败: {e}")
             return None
     
-    def _get_chapter_blueprint(
+    async def _get_chapter_blueprint(
         self,
         project_id: str,
         chapter_number: int
     ) -> Optional[ChapterBlueprint]:
         """获取章节蓝图"""
-        return self.db.query(ChapterBlueprint).filter(
-            ChapterBlueprint.project_id == project_id,
-            ChapterBlueprint.chapter_number == chapter_number
-        ).first()
+        result = await self.db.execute(
+            select(ChapterBlueprint).where(
+                ChapterBlueprint.project_id == project_id,
+                ChapterBlueprint.chapter_number == chapter_number,
+            )
+        )
+        return result.scalars().first()
     
     async def _generate_search_queries(
         self,
@@ -562,10 +569,16 @@ class KnowledgeRetrievalService:
         """获取前几章摘要"""
         from ..models.project_memory import ChapterSnapshot
         
-        snapshots = self.db.query(ChapterSnapshot).filter(
-            ChapterSnapshot.project_id == project_id,
-            ChapterSnapshot.chapter_number < current_chapter
-        ).order_by(ChapterSnapshot.chapter_number.desc()).limit(count).all()
+        snapshot_result = await self.db.execute(
+            select(ChapterSnapshot)
+            .where(
+                ChapterSnapshot.project_id == project_id,
+                ChapterSnapshot.chapter_number < current_chapter,
+            )
+            .order_by(ChapterSnapshot.chapter_number.desc())
+            .limit(count)
+        )
+        snapshots = snapshot_result.scalars().all()
         
         return [
             {
@@ -583,11 +596,22 @@ class KnowledgeRetrievalService:
     ) -> List[Dict[str, Any]]:
         """获取前几章内容"""
         from ..models.novel import Chapter, ChapterVersion
-        
-        chapters = self.db.query(Chapter).filter(
-            Chapter.project_id == project_id,
-            Chapter.chapter_number < current_chapter
-        ).order_by(Chapter.chapter_number.desc()).limit(count).all()
+        from sqlalchemy.orm import selectinload
+
+        chapter_result = await self.db.execute(
+            select(Chapter)
+            .options(
+                selectinload(Chapter.selected_version),
+                selectinload(Chapter.versions),
+            )
+            .where(
+                Chapter.project_id == project_id,
+                Chapter.chapter_number < current_chapter,
+            )
+            .order_by(Chapter.chapter_number.desc())
+            .limit(count)
+        )
+        chapters = chapter_result.scalars().all()
         
         result = []
         for ch in reversed(chapters):
@@ -605,15 +629,63 @@ class KnowledgeRetrievalService:
         return result
     
     async def _get_character_state(self, project_id: str) -> Optional[str]:
-        """获取角色状态"""
+        """获取角色状态。
+
+        优先读取按角色分行的结构化状态（CharacterState 的真实列）；
+        只有当结构化数据尚不存在时，才回退到历史的 "__all__" 文本记录
+        （兼容升级前已定稿的项目）。
+        """
         from ..models.memory_layer import CharacterState
-        
-        states = self.db.query(CharacterState).filter(
-            CharacterState.project_id == project_id,
-            CharacterState.character_name == "__all__"
-        ).order_by(CharacterState.chapter_number.desc()).first()
-        
+
+        # 1) 结构化状态：每个角色取最新一章
+        result = await self.db.execute(
+            select(CharacterState)
+            .where(
+                CharacterState.project_id == project_id,
+                CharacterState.character_name != "__all__",
+            )
+            .order_by(CharacterState.chapter_number.desc())
+        )
+        latest: Dict[str, CharacterState] = {}
+        for state in result.scalars().all():
+            latest.setdefault(state.character_name, state)
+
+        if latest:
+            blocks = []
+            for name, state in latest.items():
+                parts = [f"{name}（第{state.chapter_number}章）:"]
+                if state.location:
+                    parts.append(f"  位置: {state.location}")
+                if state.health_status or state.injuries:
+                    detail = state.health_status or "正常"
+                    if state.injuries:
+                        detail += f"（{'; '.join(str(i) for i in state.injuries)}）"
+                    parts.append(f"  身体: {detail}")
+                if state.emotion:
+                    intensity = f" 强度{state.emotion_intensity}" if state.emotion_intensity else ""
+                    reason = f"（{state.emotion_reason}）" if state.emotion_reason else ""
+                    parts.append(f"  情绪: {state.emotion}{intensity}{reason}")
+                if state.inventory:
+                    parts.append(f"  持有: {state.inventory}")
+                if state.power_level:
+                    parts.append(f"  能力: {state.power_level}")
+                if state.relationship_changes:
+                    parts.append(f"  关系变化: {state.relationship_changes}")
+                blocks.append("\n".join(parts))
+            return "\n\n".join(blocks)
+
+        # 2) 兼容旧数据
+        legacy = await self.db.execute(
+            select(CharacterState)
+            .where(
+                CharacterState.project_id == project_id,
+                CharacterState.character_name == "__all__",
+            )
+            .order_by(CharacterState.chapter_number.desc())
+        )
+        states = legacy.scalars().first()
+
         if states and states.extra:
             return states.extra.get("raw_state_text")
-        
+
         return None

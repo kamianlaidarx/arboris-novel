@@ -14,6 +14,11 @@ import enum
 
 from ..db.base import Base
 
+# 与 novel.py 保持一致：SQLite 只对 INTEGER PRIMARY KEY 自增，
+# 裸 BigInteger 主键在 SQLite 上插入会报 NOT NULL constraint failed: <table>.id。
+# with_variant 让 MySQL 继续用 BIGINT，SQLite 退化为 INTEGER。
+BIGINT_PK_TYPE = BigInteger().with_variant(Integer, "sqlite")
+
 
 class CharacterStateType(str, enum.Enum):
     """角色状态类型"""
@@ -36,7 +41,7 @@ class CharacterState(Base):
     """
     __tablename__ = "character_states"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BIGINT_PK_TYPE, primary_key=True, autoincrement=True)
     project_id = Column(String(255), ForeignKey("novel_projects.id", ondelete="CASCADE"), nullable=False, index=True)
     character_id = Column(BigInteger, ForeignKey("blueprint_characters.id", ondelete="CASCADE"), nullable=False, index=True)
     character_name = Column(String(255), nullable=False)  # 冗余存储，方便查询
@@ -90,7 +95,7 @@ class TimelineEvent(Base):
     """
     __tablename__ = "timeline_events"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BIGINT_PK_TYPE, primary_key=True, autoincrement=True)
     project_id = Column(String(255), ForeignKey("novel_projects.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # 时间信息
@@ -127,7 +132,7 @@ class CausalChain(Base):
     """
     __tablename__ = "causal_chains"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BIGINT_PK_TYPE, primary_key=True, autoincrement=True)
     project_id = Column(String(255), ForeignKey("novel_projects.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # 因果关系
@@ -163,7 +168,7 @@ class StoryTimeTracker(Base):
     """
     __tablename__ = "story_time_trackers"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BIGINT_PK_TYPE, primary_key=True, autoincrement=True)
     project_id = Column(String(255), ForeignKey("novel_projects.id", ondelete="CASCADE"), nullable=False, unique=True)
     
     # 时间设定

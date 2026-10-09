@@ -161,6 +161,10 @@ class Chapter(Base):
     real_summary: Mapped[Optional[str]] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="not_generated")
     word_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 定稿状态：此前定稿走 fire-and-forget，失败只写日志，前端无从知晓。
+    # finalize_status: pending | success | failed
+    finalize_status: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    finalize_error: Mapped[Optional[str]] = mapped_column(Text, default=None)
     selected_version_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("chapter_versions.id", ondelete="SET NULL"), nullable=True
     )

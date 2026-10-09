@@ -15,7 +15,8 @@ import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.project_memory import ProjectMemory, ChapterSnapshot
 from ..models.memory_layer import CharacterState
@@ -23,6 +24,64 @@ from ..models.novel import Chapter, ChapterVersion, NovelProject
 from ..models.chapter_blueprint import ChapterBlueprint
 from .llm_service import LLMService
 from .vector_store_service import VectorStoreService
+from .fact_store import backfill_from_character_state
+
+
+def _parse_character_state_payload(text: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    """把角色状态更新解析为结构化列表。
+
+    返回：
+      - ``None`` 表示无法解析（调用方应回退到文本记录）
+      - ``[]``   表示解析成功但本章没有角色状态变更
+      - ``[{...}]`` 每个元素是一个角色的状态更新
+    """
+    if not text or not text.strip():
+        return None
+
+    import json
+
+    candidate = text.strip()
+    # 剥掉 markdown 代码围栏
+    if candidate.startswith("```"):
+        parts = candidate.split("```")
+        if len(parts) >= 2:
+            candidate = parts[1]
+            if candidate.lstrip().lower().startswith("json"):
+                candidate = candidate.lstrip()[4:]
+
+    # 截取最外层 JSON
+    start = min(
+        (i for i in (candidate.find("["), candidate.find("{")) if i >= 0),
+        default=-1,
+    )
+    if start < 0:
+        return None
+    end = max(candidate.rfind("]"), candidate.rfind("}"))
+    if end <= start:
+        return None
+
+    try:
+        data = json.loads(candidate[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    if isinstance(data, dict):
+        # 容忍 {"characters": [...]} 或单个角色对象
+        for key in ("characters", "character_states", "states", "items"):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+        else:
+            data = [data]
+
+    if not isinstance(data, list):
+        return None
+
+    cleaned: List[Dict[str, Any]] = []
+    for item in data:
+        if isinstance(item, dict):
+            cleaned.append(item)
+    return cleaned
 
 logger = logging.getLogger(__name__)
 
@@ -51,33 +110,36 @@ UPDATE_CHARACTER_STATE_PROMPT = """\
 以下是新完成的章节文本：
 {chapter_text}
 
-这是当前的角色状态文档：
+这是当前的角色状态记录（上一章结束时）：
 {old_state}
 
-请更新主要角色状态，内容格式：
-角色名：
-├──物品:
-│  ├──物品名：描述
-│  └──...
-├──能力:
-│  ├──技能名：描述
-│  └──...
-├──状态:
-│  ├──身体状态：描述
-│  └──心理状态：描述
-├──主要角色间关系网:
-│  ├──角色A：关系描述
-│  └──...
-├──触发或加深的事件:
-│  ├──事件1：描述
-│  └──...
+请提取本章中【发生变化的】主要角色状态，用于结构化存储。
 
 要求：
-- 请直接在已有文档基础上进行增删
-- 不改变原有结构，语言尽量简洁、有条理
-- 新出场角色简要描述即可，淡出视线的角色可删除
+- 只输出本章【确实发生变化】的角色；没变化的角色不要输出。
+- 没变化的字段可以省略，系统会自动继承上一章的值。
+- 只依据本章正文，不要推测或补全正文没有的信息。
+- 严格输出 JSON 数组，不要输出任何解释文字、不要用 markdown 代码围栏。
 
-仅返回更新后的角色状态文本，不要解释任何内容。
+输出格式：
+[
+  {{
+    "name": "角色名",
+    "location": "当前位置（变化时填写）",
+    "health_status": "healthy|injured|critical|dead（变化时填写）",
+    "injuries": ["受伤描述（变化时填写）"],
+    "emotion": "主要情绪（变化时填写）",
+    "emotion_intensity": 1到10的整数,
+    "emotion_reason": "情绪原因（变化时填写）",
+    "inventory": ["当前持有物品（变化时填写）"],
+    "inventory_changes": {{"gained": [], "lost": []}},
+    "power_level": "实力等级（变化时填写）",
+    "power_changes": {{"gained": [], "lost": []}},
+    "relationship_changes": {{"角色名": "关系变化描述"}}
+  }}
+]
+
+如果本章没有任何角色状态变化，输出空数组 []。
 """
 
 UPDATE_PLOT_ARCS_PROMPT = """\
@@ -145,7 +207,7 @@ class FinalizeService:
     
     def __init__(
         self,
-        db: Session,
+        db: AsyncSession,
         llm_service: LLMService,
         vector_store_service: Optional[VectorStoreService] = None
     ):
@@ -218,6 +280,55 @@ class FinalizeService:
                 project_memory.plot_arcs = new_plot_arcs
                 result["updates"]["plot_arcs"] = "updated"
             
+            # 4.5 从结构化角色状态派生时序事实（零额外 LLM 调用）
+            # 这一步把「角色当前状态」翻译成带有效期区间的原子事实，
+            # 供后续章节按「第 N 章时该事实是否成立」精确查询。
+            try:
+                derived = await backfill_from_character_state(
+                    self.db, project_id, chapter_number
+                )
+                if derived:
+                    result["updates"]["narrative_facts"] = derived
+            except Exception as exc:
+                # 事实派生失败不应让整次定稿失败——摘要/状态/快照都已经写好了
+                logger.error("派生时序事实失败: project=%s chapter=%s error=%s",
+                             project_id, chapter_number, exc, exc_info=True)
+                result["updates"]["narrative_facts_error"] = str(exc)[:500]
+
+            # 4.6 提取章间交接契约（章末瞬时状态）
+            # 事实库记录跨章持久事实，但表达不了「章节结束那一刻他在哪、在做什么」。
+            # 这正是「上一章刚睡着、下一章醒着发呆」这类 bug 的来源。
+            try:
+                from .chapter_contract_service import ChapterContractService
+
+                contract_service = ChapterContractService(self.db, self.llm_service)
+                contract = await contract_service.extract_and_save(
+                    project_id=project_id,
+                    chapter_number=chapter_number,
+                    chapter_text=chapter_text,
+                    user_id=user_id,
+                )
+                if contract is not None:
+                    result["updates"]["chapter_contract"] = "saved"
+
+                    # 立刻与上一章契约做确定性比对，把矛盾记进结果
+                    check = await contract_service.check_transition(
+                        project_id, chapter_number - 1, chapter_number
+                    )
+                    if not check.is_clean:
+                        result["updates"]["transition_violations"] = [
+                            {
+                                "kind": v.kind,
+                                "severity": v.severity,
+                                "message": v.message,
+                            }
+                            for v in check.violations
+                        ]
+            except Exception as exc:
+                logger.error("提取章间契约失败: project=%s chapter=%s error=%s",
+                             project_id, chapter_number, exc, exc_info=True)
+                result["updates"]["chapter_contract_error"] = str(exc)[:500]
+
             # 5. 更新向量库
             if not skip_vector_update and self.vector_store_service:
                 await self._update_vector_store(
@@ -251,12 +362,12 @@ class FinalizeService:
             # 8. 更新章节蓝图状态
             await self._update_blueprint_status(project_id, chapter_number)
             
-            self.db.commit()
+            await self.db.commit()
             logger.info(f"定稿处理完成: project={project_id}, chapter={chapter_number}")
             
         except Exception as e:
-            logger.error(f"定稿处理失败: {e}")
-            self.db.rollback()
+            logger.error(f"定稿处理失败: {e}", exc_info=True)
+            await self.db.rollback()
             result["success"] = False
             result["error"] = str(e)
         
@@ -264,9 +375,10 @@ class FinalizeService:
     
     async def _get_or_create_project_memory(self, project_id: str) -> ProjectMemory:
         """获取或创建项目记忆"""
-        memory = self.db.query(ProjectMemory).filter(
-            ProjectMemory.project_id == project_id
-        ).first()
+        result = await self.db.execute(
+            select(ProjectMemory).where(ProjectMemory.project_id == project_id)
+        )
+        memory = result.scalars().first()
         
         if not memory:
             memory = ProjectMemory(
@@ -279,7 +391,7 @@ class FinalizeService:
                 }
             )
             self.db.add(memory)
-            self.db.flush()
+            await self.db.flush()
         
         return memory
     
@@ -310,9 +422,12 @@ class FinalizeService:
     async def _get_character_state_text(self, project_id: str) -> str:
         """获取角色状态文本"""
         # 获取最新的角色状态记录
-        states = self.db.query(CharacterState).filter(
-            CharacterState.project_id == project_id
-        ).order_by(CharacterState.chapter_number.desc()).all()
+        result = await self.db.execute(
+            select(CharacterState)
+            .where(CharacterState.project_id == project_id)
+            .order_by(CharacterState.chapter_number.desc())
+        )
+        states = result.scalars().all()
         
         if not states:
             return ""
@@ -372,18 +487,94 @@ class FinalizeService:
         chapter_number: int,
         state_text: str
     ):
-        """保存角色状态到数据库"""
-        # 解析状态文本并保存
-        # 这里简化处理，实际可以做更精细的解析
-        # 创建一个通用的状态记录
-        state = CharacterState(
-            project_id=project_id,
-            character_id=0,  # 通用记录
-            character_name="__all__",
-            chapter_number=chapter_number,
-            extra={"raw_state_text": state_text}
+        """保存角色状态到数据库。
+
+        解析结构化 JSON 并按角色写入 CharacterState 的真实列。
+        解析失败时回退为单条 "__all__" 记录，保证不丢数据。
+        """
+        parsed = _parse_character_state_payload(state_text)
+
+        if parsed is None:
+            # 回退：保留原始文本，避免信息丢失（旧行为）
+            logger.warning(
+                "角色状态不是可解析的结构化 JSON，回退为 __all__ 文本记录: project=%s chapter=%s",
+                project_id,
+                chapter_number,
+            )
+            self.db.add(
+                CharacterState(
+                    project_id=project_id,
+                    character_id=0,
+                    character_name="__all__",
+                    chapter_number=chapter_number,
+                    extra={"raw_state_text": state_text},
+                )
+            )
+            return
+
+        if not parsed:
+            logger.info(
+                "本章未提取到角色状态变更: project=%s chapter=%s", project_id, chapter_number
+            )
+            return
+
+        # 取上一章各角色状态做继承，避免每章都要模型重复输出全部字段
+        existing = await self._latest_character_states(project_id, chapter_number)
+
+        for item in parsed:
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            prev = existing.get(name)
+            state = CharacterState(
+                project_id=project_id,
+                character_id=prev.character_id if prev and prev.character_id else 0,
+                character_name=name,
+                chapter_number=chapter_number,
+                # 未提供的字段继承上一章
+                location=item.get("location", prev.location if prev else None),
+                location_detail=item.get("location_detail", prev.location_detail if prev else None),
+                emotion=item.get("emotion", prev.emotion if prev else None),
+                emotion_intensity=item.get(
+                    "emotion_intensity", prev.emotion_intensity if prev else None
+                ),
+                emotion_reason=item.get("emotion_reason", prev.emotion_reason if prev else None),
+                health_status=item.get(
+                    "health_status", prev.health_status if prev else "healthy"
+                ),
+                injuries=item.get("injuries", prev.injuries if prev else None),
+                inventory=item.get("inventory", prev.inventory if prev else None),
+                inventory_changes=item.get("inventory_changes"),
+                relationship_changes=item.get("relationship_changes"),
+                power_level=item.get("power_level", prev.power_level if prev else None),
+                power_changes=item.get("power_changes"),
+            )
+            self.db.add(state)
+
+        logger.info(
+            "已写入 %d 个角色的结构化状态: project=%s chapter=%s",
+            len(parsed),
+            project_id,
+            chapter_number,
         )
-        self.db.add(state)
+
+    async def _latest_character_states(
+        self, project_id: str, chapter_number: int
+    ) -> Dict[str, CharacterState]:
+        """取每个角色在 chapter_number 之前的最新一条结构化状态。"""
+        result = await self.db.execute(
+            select(CharacterState)
+            .where(
+                CharacterState.project_id == project_id,
+                CharacterState.chapter_number < chapter_number,
+                CharacterState.character_name != "__all__",
+            )
+            .order_by(CharacterState.chapter_number.desc())
+        )
+        latest: Dict[str, CharacterState] = {}
+        for state in result.scalars().all():
+            latest.setdefault(state.character_name, state)
+        return latest
     
     async def _update_plot_arcs(
         self,
@@ -491,10 +682,13 @@ class FinalizeService:
     
     async def _update_blueprint_status(self, project_id: str, chapter_number: int):
         """更新章节蓝图状态"""
-        blueprint = self.db.query(ChapterBlueprint).filter(
-            ChapterBlueprint.project_id == project_id,
-            ChapterBlueprint.chapter_number == chapter_number
-        ).first()
+        result = await self.db.execute(
+            select(ChapterBlueprint).where(
+                ChapterBlueprint.project_id == project_id,
+                ChapterBlueprint.chapter_number == chapter_number,
+            )
+        )
+        blueprint = result.scalars().first()
         
         if blueprint:
             blueprint.is_finalized = True
@@ -509,15 +703,22 @@ class FinalizeService:
         
         用于在生成章节时提供上下文参考。
         """
-        memory = self.db.query(ProjectMemory).filter(
-            ProjectMemory.project_id == project_id
-        ).first()
+        memory_result = await self.db.execute(
+            select(ProjectMemory).where(ProjectMemory.project_id == project_id)
+        )
+        memory = memory_result.scalars().first()
         
         # 获取最近的章节快照
-        recent_snapshots = self.db.query(ChapterSnapshot).filter(
-            ChapterSnapshot.project_id == project_id,
-            ChapterSnapshot.chapter_number < chapter_number
-        ).order_by(ChapterSnapshot.chapter_number.desc()).limit(3).all()
+        snapshot_result = await self.db.execute(
+            select(ChapterSnapshot)
+            .where(
+                ChapterSnapshot.project_id == project_id,
+                ChapterSnapshot.chapter_number < chapter_number,
+            )
+            .order_by(ChapterSnapshot.chapter_number.desc())
+            .limit(3)
+        )
+        recent_snapshots = snapshot_result.scalars().all()
         
         return {
             "global_summary": memory.global_summary if memory else None,

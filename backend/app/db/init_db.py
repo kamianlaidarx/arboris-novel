@@ -113,9 +113,38 @@ async def _ensure_schema_updates() -> None:
     async with engine.begin() as conn:
         def _upgrade(sync_conn):
             inspector = inspect(sync_conn)
+
             columns = {col["name"] for col in inspector.get_columns("chapter_outlines")}
             if "metadata" not in columns:
                 sync_conn.execute(text("ALTER TABLE chapter_outlines ADD COLUMN metadata JSON"))
+
+            # 定稿状态可见化：旧库需要补这两列
+            chapter_columns = {col["name"] for col in inspector.get_columns("chapters")}
+            if "finalize_status" not in chapter_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE chapters ADD COLUMN finalize_status VARCHAR(32)")
+                )
+            if "finalize_error" not in chapter_columns:
+                sync_conn.execute(text("ALTER TABLE chapters ADD COLUMN finalize_error TEXT"))
+
+            # 伏笔回收窗口与触发谓词：旧库需要补这四列
+            fs_columns = {col["name"] for col in inspector.get_columns("foreshadowings")}
+            if "earliest_payoff_chapter" not in fs_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE foreshadowings ADD COLUMN earliest_payoff_chapter INTEGER")
+                )
+            if "trigger_condition" not in fs_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE foreshadowings ADD COLUMN trigger_condition TEXT")
+                )
+            if "required_hints" not in fs_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE foreshadowings ADD COLUMN required_hints JSON")
+                )
+            if "is_overdue" not in fs_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE foreshadowings ADD COLUMN is_overdue BOOLEAN DEFAULT 0")
+                )
         await conn.run_sync(_upgrade)
 
 

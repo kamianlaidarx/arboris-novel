@@ -315,15 +315,30 @@ async def _finalize_chapter_async(
             except RuntimeError as exc:
                 logger.warning("向量库初始化失败，跳过定稿写入: %s", exc)
 
-        sync_session = getattr(session, "sync_session", session)
-        finalize_service = FinalizeService(sync_session, llm_service, vector_store)
-        await finalize_service.finalize_chapter(
+        finalize_service = FinalizeService(session, llm_service, vector_store)
+        finalize_result = await finalize_service.finalize_chapter(
             project_id=project_id,
             chapter_number=chapter_number,
             chapter_text=selected_version.content,
             user_id=user_id,
             skip_vector_update=skip_vector_update,
         )
+
+        # 定稿失败必须可见：此前 fire-and-forget 会静默吞掉错误，
+        # 章节看起来是成功的，但 global_summary / plot_arcs / 角色状态都没写进去。
+        if finalize_result.get("success", False):
+            chapter.finalize_status = "success"
+            chapter.finalize_error = None
+        else:
+            logger.error(
+                "后台定稿失败: project=%s chapter=%s error=%s",
+                project_id,
+                chapter_number,
+                finalize_result.get("error"),
+            )
+            chapter.finalize_status = "failed"
+            chapter.finalize_error = str(finalize_result.get("error"))[:2000]
+        await session.commit()
 
 
 def _schedule_finalize_task(
@@ -333,7 +348,7 @@ def _schedule_finalize_task(
     user_id: int,
     skip_vector_update: bool = False,
 ) -> None:
-    asyncio.create_task(
+    task = asyncio.create_task(
         _finalize_chapter_async(
             project_id=project_id,
             chapter_number=chapter_number,
@@ -342,6 +357,26 @@ def _schedule_finalize_task(
             skip_vector_update=skip_vector_update,
         )
     )
+
+    def _on_done(t: "asyncio.Task[None]") -> None:
+        """没有这个回调，任务内未捕获的异常只会变成
+        'Task exception was never retrieved' 警告，业务上是完全静默的。"""
+        if t.cancelled():
+            logger.warning(
+                "后台定稿任务被取消: project=%s chapter=%s", project_id, chapter_number
+            )
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error(
+                "后台定稿任务异常: project=%s chapter=%s error=%r",
+                project_id,
+                chapter_number,
+                exc,
+                exc_info=exc,
+            )
+
+    task.add_done_callback(_on_done)
 
 
 @router.post("/advanced/generate", response_model=AdvancedGenerateResponse)
@@ -426,8 +461,7 @@ async def finalize_chapter(
         except RuntimeError as exc:
             logger.warning("向量库初始化失败，跳过定稿写入: %s", exc)
 
-    sync_session = getattr(session, "sync_session", session)
-    finalize_service = FinalizeService(sync_session, LLMService(session), vector_store)
+    finalize_service = FinalizeService(session, LLMService(session), vector_store)
     finalize_result = await finalize_service.finalize_chapter(
         project_id=request.project_id,
         chapter_number=chapter_number,

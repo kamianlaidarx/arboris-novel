@@ -75,8 +75,7 @@ async def review_consistency(
     novel_service = NovelService(session)
     await novel_service.ensure_project_owner(request.project_id, current_user.id)
 
-    sync_session = getattr(session, "sync_session", session)
-    consistency_service = ConsistencyService(sync_session, LLMService(session))
+    consistency_service = ConsistencyService(session, LLMService(session))
     result = await consistency_service.check_consistency(
         project_id=request.project_id,
         chapter_text=request.chapter_text,

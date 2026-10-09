@@ -18,6 +18,8 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from enum import Enum
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from ..models.project_memory import ProjectMemory
@@ -154,7 +156,7 @@ class ConsistencyService:
     
     def __init__(
         self,
-        db: Session,
+        db: "AsyncSession",
         llm_service: LLMService
     ):
         self.db = db
@@ -344,9 +346,10 @@ class ConsistencyService:
         context = {}
         
         # 获取小说设定
-        blueprint = self.db.query(NovelBlueprint).filter(
-            NovelBlueprint.project_id == project_id
-        ).first()
+        blueprint_result = await self.db.execute(
+            select(NovelBlueprint).where(NovelBlueprint.project_id == project_id)
+        )
+        blueprint = blueprint_result.scalars().first()
         
         if blueprint:
             setting_parts = []
@@ -361,9 +364,10 @@ class ConsistencyService:
             context["novel_setting"] = "\n".join(setting_parts)
         
         # 获取项目记忆
-        memory = self.db.query(ProjectMemory).filter(
-            ProjectMemory.project_id == project_id
-        ).first()
+        memory_result = await self.db.execute(
+            select(ProjectMemory).where(ProjectMemory.project_id == project_id)
+        )
+        memory = memory_result.scalars().first()
         
         if memory:
             context["global_summary"] = memory.global_summary or ""
@@ -371,26 +375,52 @@ class ConsistencyService:
                 import json
                 context["plot_arcs"] = json.dumps(memory.plot_arcs, ensure_ascii=False, indent=2)
         
-        # 获取角色状态（简化版）
+        # 获取角色状态：优先结构化列，回退旧 "__all__" 文本
         from ..models.memory_layer import CharacterState
-        states = self.db.query(CharacterState).filter(
-            CharacterState.project_id == project_id
-        ).order_by(CharacterState.chapter_number.desc()).limit(10).all()
-        
+        state_result = await self.db.execute(
+            select(CharacterState)
+            .where(CharacterState.project_id == project_id)
+            .order_by(CharacterState.chapter_number.desc())
+            .limit(50)
+        )
+        states = state_result.scalars().all()
+
         if states:
-            state_texts = []
+            latest: Dict[str, CharacterState] = {}
+            legacy_text = ""
             for s in states:
-                if s.extra and "raw_state_text" in s.extra:
-                    state_texts.append(s.extra["raw_state_text"])
-                    break
-            context["character_state"] = "\n".join(state_texts) if state_texts else ""
+                if s.character_name == "__all__":
+                    if not legacy_text and s.extra and "raw_state_text" in s.extra:
+                        legacy_text = s.extra["raw_state_text"]
+                    continue
+                latest.setdefault(s.character_name, s)
+
+            blocks: List[str] = []
+            for name, s in latest.items():
+                fields = [f"{name}（第{s.chapter_number}章）"]
+                if s.location:
+                    fields.append(f"位置={s.location}")
+                if s.health_status:
+                    fields.append(f"身体={s.health_status}")
+                if s.emotion:
+                    fields.append(f"情绪={s.emotion}")
+                if s.inventory:
+                    fields.append(f"持有={s.inventory}")
+                if s.power_level:
+                    fields.append(f"能力={s.power_level}")
+                blocks.append("；".join(fields))
+
+            context["character_state"] = "\n".join(blocks) if blocks else legacy_text
         
         # 获取未回收伏笔
         if include_foreshadowing:
-            foreshadowings = self.db.query(Foreshadowing).filter(
-                Foreshadowing.project_id == project_id,
-                Foreshadowing.status.in_(["planted", "developing"])
-            ).all()
+            foreshadowing_result = await self.db.execute(
+                select(Foreshadowing).where(
+                    Foreshadowing.project_id == project_id,
+                    Foreshadowing.status.in_(["planted", "developing"]),
+                )
+            )
+            foreshadowings = foreshadowing_result.scalars().all()
             
             if foreshadowings:
                 foreshadowing_texts = [
