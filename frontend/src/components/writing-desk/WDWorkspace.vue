@@ -35,7 +35,7 @@
               手动编辑
             </button>
             <button
-              @click="confirmRegenerateChapter"
+              @click="openGenerateDialog"
               :disabled="generatingChapter === selectedChapterNumber"
               class="md-btn md-btn-filled md-ripple flex items-center gap-2 whitespace-nowrap disabled:opacity-50"
             >
@@ -60,13 +60,24 @@
           @update:selectedVersionIndex="$emit('update:selectedVersionIndex', $event)"
           @showVersionDetail="$emit('showVersionDetail', $event)"
           @confirmVersionSelection="$emit('confirmVersionSelection')"
-          @generateChapter="$emit('generateChapter', $event)"
+          @generateChapter="openGenerateDialog"
           @showVersionSelector="$emit('showVersionSelector')"
           @regenerateChapter="$emit('regenerateChapter')"
           @evaluateChapter="$emit('evaluateChapter')"
           @showEvaluationDetail="$emit('showEvaluationDetail')"
         />
       </div>
+
+      <!-- 生成/重新生成前的写作指令输入。
+           此前只弹一个确认框，用户无法表达任何意图，等于纯重摇。 -->
+      <ChapterGenerateDialog
+        :show="generateDialogOpen"
+        :chapter-number="selectedChapterNumber ?? 0"
+        :chapter-title="selectedChapterOutline?.title"
+        :is-regenerate="selectedChapterNumber !== null && isChapterCompleted(selectedChapterNumber)"
+        @close="generateDialogOpen = false"
+        @confirm="onGenerateConfirm"
+      />
     </div>
 
     <!-- 编辑章节内容模态框 -->
@@ -134,6 +145,7 @@
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { globalAlert } from '@/composables/useAlert'
 import type { Chapter, ChapterOutline, ChapterGenerationResponse, ChapterVersion, NovelProject } from '@/api/novel'
+import ChapterGenerateDialog from '@/components/ChapterGenerateDialog.vue'
 import WorkspaceInitial from './workspace/WorkspaceInitial.vue'
 import ChapterGenerating from './workspace/ChapterGenerating.vue'
 import VersionSelector from './workspace/VersionSelector.vue'
@@ -169,11 +181,22 @@ const emit = defineEmits([
   'editChapter'
 ])
 
-const confirmRegenerateChapter = async () => {
-  const confirmed = await globalAlert.showConfirm('重新生成会覆盖当前章节的现有内容，确定继续吗？', '重新生成确认')
-  if (confirmed) {
-    emit('regenerateChapter')
-  }
+/**
+ * 打开「生成/重新生成」对话框，而不是直接生成。
+ *
+ * 此前只弹一个确认框就重摇，用户无法表达任何意图——而后端其实早就支持
+ * ``writing_notes``（会注入提示词的 [写作指令] 段），只是前端从未发送。
+ * 没有指令输入时，重新生成只能靠运气。
+ */
+const generateDialogOpen = ref(false)
+
+const openGenerateDialog = () => {
+  generateDialogOpen.value = true
+}
+
+/** 对话框确认后带着写作指令触发生成。 */
+const onGenerateConfirm = (writingNotes: string) => {
+  emit('generateChapter', { chapterNumber: props.selectedChapterNumber, writingNotes })
 }
 
 // 编辑模态框状态

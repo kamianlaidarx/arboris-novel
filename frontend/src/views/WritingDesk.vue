@@ -395,7 +395,21 @@ const selectChapter = (chapterNumber: number) => {
   closeSidebar()
 }
 
-const generateChapter = async (chapterNumber: number) => {
+/**
+ * 生成章节。
+ *
+ * 兼容两种调用来源：
+ *   - 章节列表等处的按钮直接传章节号（无写作指令）
+ *   - WDWorkspace 的对话框传 { chapterNumber, writingNotes }
+ * 写作指令会注入提示词的 [写作指令] 段（后端早已支持，此前前端未接）。
+ */
+const generateChapter = async (
+  payload: number | { chapterNumber: number | null; writingNotes?: string }
+) => {
+  const chapterNumber = typeof payload === 'number' ? payload : payload.chapterNumber
+  const writingNotes = typeof payload === 'number' ? undefined : payload.writingNotes
+  if (chapterNumber === null || chapterNumber === undefined) return
+
   // 检查是否可以生成该章节
   if (!canGenerateChapter(chapterNumber) && !isChapterFailed(chapterNumber) && !hasChapterInProgress(chapterNumber)) {
     globalAlert.showError('请按顺序生成章节，先完成前面的章节', '生成受限')
@@ -426,7 +440,7 @@ const generateChapter = async (chapterNumber: number) => {
       }
     }
 
-    await novelStore.generateChapter(chapterNumber)
+    await novelStore.generateChapter(chapterNumber, { writingNotes })
     
     // store 中的 project 已经被更新，所以我们不需要手动修改本地状态
     // chapterGenerationResult 也不再需要，因为 availableVersions 会从更新后的 project.chapters 中获取数据

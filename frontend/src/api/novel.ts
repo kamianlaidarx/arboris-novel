@@ -588,13 +588,20 @@ export class NovelAPI {
   static async generateChapter(
     projectId: string,
     chapterNumber: number,
-    options: { onProgress?: (seconds: number) => void } = {}
+    options: {
+      onProgress?: (seconds: number) => void
+      /** 额外写作指令。后端早已支持（注入提示词的 [写作指令] 段），此前前端从未发送。 */
+      writingNotes?: string
+    } = {}
   ): Promise<NovelProject> {
     // 章节生成是最重的操作（多阶段 LLM 调用），必须走流式。
     return callLongTaskStream(
       `${WRITER_BASE}/${projectId}/chapters/generate-stream`,
-      { chapter_number: chapterNumber },
-      options
+      {
+        chapter_number: chapterNumber,
+        writing_notes: options.writingNotes ?? null,
+      },
+      { onProgress: options.onProgress }
     )
   }
 
