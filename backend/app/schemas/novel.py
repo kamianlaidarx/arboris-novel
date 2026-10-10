@@ -54,8 +54,12 @@ class ChapterGenerationStatus(str, Enum):
 
 class ChapterOutline(BaseModel):
     chapter_number: int
-    title: str
-    summary: str
+    # title / summary 给默认值而不是必填：模型偶尔会漏掉某个字段，
+    # 而一次蓝图生成要 40 秒以上，因为一个缺失的标题就让整次生成失败
+    # 并不划算（实测 gemini 输出的 10 个章节里全都漏了 title）。
+    # 界面会展示空标题，用户可以手动补，比整份蓝图丢掉好。
+    title: str = ""
+    summary: str = ""
 
 
 class Chapter(ChapterOutline):
