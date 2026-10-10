@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 _PREFERRED_CONTENT_KEYS: tuple[str, ...] = (
     "content",
@@ -312,6 +315,78 @@ class NovelService:
         await self.session.commit()
         await self._touch_project(project_id)
 
+    async def _sync_relationship_names(
+        self,
+        project_id: str,
+        old_characters: Sequence[Any],
+        new_characters: Sequence[Dict[str, Any]],
+    ) -> None:
+        """把角色改名同步到关系表。
+
+        为什么需要：``BlueprintRelationship.character_from/to`` 存的是
+        **角色名字符串**，不是外键。角色被改名后，旧关系会指向一个
+        不存在的角色——界面照常显示，不会报任何错，但关系实际上失效了。
+
+        如何识别「同一个角色被改名」：前后端都没有稳定的角色 ID
+        （保存时整批删除重建），所以只能靠位置推断。这里用两条规则：
+
+        1. **按位置配对**：第 i 个旧角色对应第 i 个新角色。
+           编辑器是列表形式，改名不会改变顺序，这条覆盖绝大多数情况。
+        2. **名字仍然存在的视为未改名**：避免「中间删了一个角色」
+           导致后续位置整体错位、把 A 的名字安到 B 头上。
+
+        只在旧名确实消失、且新名确实新增时才替换，宁可少改也不错改。
+        """
+        old_names = [(c.name or "").strip() for c in old_characters]
+        new_names = [(c.get("name") or "").strip() for c in new_characters]
+        if not old_names or not new_names:
+            return
+
+        new_name_set = set(new_names)
+        old_name_set = set(old_names)
+        # 未改名 = 新旧名单里都还在的名字
+        unchanged = old_name_set & new_name_set
+
+        rename_map: Dict[str, str] = {}
+        for index, old_name in enumerate(old_names):
+            if not old_name or old_name in unchanged:
+                continue
+            if index >= len(new_names):
+                break
+            new_name = new_names[index]
+            if not new_name or new_name in old_name_set:
+                # 新位置上的名字本来就存在（说明是顺序变动而非改名），跳过
+                continue
+            rename_map[old_name] = new_name
+
+        if not rename_map:
+            return
+
+        relationships = (
+            await self.session.execute(
+                select(BlueprintRelationship).where(
+                    BlueprintRelationship.project_id == project_id
+                )
+            )
+        ).scalars().all()
+
+        changed = 0
+        for relation in relationships:
+            if relation.character_from in rename_map:
+                relation.character_from = rename_map[relation.character_from]
+                changed += 1
+            if relation.character_to in rename_map:
+                relation.character_to = rename_map[relation.character_to]
+                changed += 1
+
+        if changed:
+            logger.info(
+                "项目 %s 角色改名，已同步 %d 处关系引用: %s",
+                project_id,
+                changed,
+                rename_map,
+            )
+
     async def patch_blueprint(self, project_id: str, patch: Dict) -> None:
         blueprint = await self.session.get(NovelBlueprint, project_id)
         if not blueprint:
@@ -327,6 +402,18 @@ class NovelService:
             existing = blueprint.world_setting or {}
             blueprint.world_setting = {**existing, **patch["world_setting"]}
         if "characters" in patch and patch["characters"] is not None:
+            # 保存前先取旧名单：关系是按【角色名】关联的
+            # （BlueprintRelationship.character_from/to 都是字符串），
+            # 角色改名后旧关系会指向一个不存在的角色，而且不会报错。
+            # 所以先算出「旧名 → 新名」的映射，回头同步关系表。
+            old_characters = (
+                await self.session.execute(
+                    select(BlueprintCharacter)
+                    .where(BlueprintCharacter.project_id == project_id)
+                    .order_by(BlueprintCharacter.position)
+                )
+            ).scalars().all()
+
             await self.session.execute(delete(BlueprintCharacter).where(BlueprintCharacter.project_id == project_id))
             for index, data in enumerate(patch["characters"]):
                 self.session.add(
@@ -348,6 +435,13 @@ class NovelService:
                         }},
                         position=index,
                     )
+                )
+
+            # 本次请求没带关系数据 → 用户只改了角色，
+            # 需要把改名同步到已存的关系上，否则关系会静默失效。
+            if patch.get("relationships") is None:
+                await self._sync_relationship_names(
+                    project_id, old_characters, patch["characters"]
                 )
         if "relationships" in patch and patch["relationships"] is not None:
             await self.session.execute(delete(BlueprintRelationship).where(BlueprintRelationship.project_id == project_id))
