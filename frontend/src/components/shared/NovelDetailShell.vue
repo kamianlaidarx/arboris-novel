@@ -167,6 +167,7 @@
       :title="modalTitle"
       :content="modalContent"
       :field="modalField"
+      :characters="editableCharacters"
       @close="isModalOpen = false"
       @save="handleSave"
     />
@@ -468,6 +469,23 @@ const goToWritingDesk = async () => {
 const currentComponent = computed(() => sectionComponents[activeSection.value])
 const isSectionLoading = computed(() => sectionLoading[activeSection.value])
 const currentError = computed(() => sectionError[activeSection.value])
+
+/**
+ * 供「关系」编辑器下拉使用的角色名单。
+ *
+ * 优先取已加载的 characters 区块数据；没加载过就退回项目的蓝图数据。
+ * 两条来源都试是因为用户可能直接点开「关系」编辑（此时 characters
+ * 区块还没被请求过），拿不到名单就会退回手输，失去防错的意义。
+ */
+const editableCharacters = computed<Array<{ name?: string }>>(() => {
+  const fromSection = sectionData.characters?.characters
+  if (Array.isArray(fromSection) && fromSection.length) return fromSection
+
+  const fromBlueprint = (novel.value as any)?.blueprint?.characters
+  if (Array.isArray(fromBlueprint)) return fromBlueprint
+
+  return []
+})
 
 const componentProps = computed(() => {
   const data = sectionData[activeSection.value]

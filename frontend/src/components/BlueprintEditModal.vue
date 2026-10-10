@@ -33,7 +33,11 @@
             <ChapterOutlineEditor v-if="props.field === 'chapter_outline'" v-model="editableContent" />
             <KeyLocationsEditor v-else-if="props.field === 'world_setting.key_locations'" v-model="editableContent" />
             <CharactersEditor v-else-if="props.field === 'characters'" v-model="editableContent" />
-            <RelationshipsEditor v-else-if="props.field === 'relationships'" v-model="editableContent" />
+            <RelationshipsEditor
+              v-else-if="props.field === 'relationships'"
+              v-model="editableContent"
+              :characters="props.characters"
+            />
             <FactionsEditor v-else-if="props.field === 'world_setting.factions'" v-model="editableContent" />
             <div v-else class="md-text-field">
               <textarea 
@@ -85,7 +89,15 @@ const props = defineProps({
     type: [String, Object, Array],
     default: ''
   },
-  field: String
+  field: String,
+  /**
+   * 当前项目的角色名单，供「关系」编辑器做下拉选择。
+   * 关系是按角色名关联的，手打错一个字就会指向不存在的角色且不报错。
+   */
+  characters: {
+    type: Array as () => Array<{ name?: string } | string>,
+    default: () => []
+  }
 });
 
 const emit = defineEmits(['close', 'save']);
