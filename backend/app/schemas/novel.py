@@ -279,3 +279,38 @@ class IgnoreNamesRequest(BaseModel):
     """
 
     names: List[str] = Field(default_factory=list)
+
+
+class OutlineRegenRequest(BaseModel):
+    """章节大纲重生成请求。
+
+    与原有 ``GenerateOutlineRequest`` 的区别：那个只能从末尾追加
+    （``start_chapter`` 由前端算成「现有数量+1」），这个可以指定任意范围
+    重做，并带上用户的优化建议。
+    """
+
+    start_chapter: int = Field(ge=1, description="起始章节号（含）")
+    num_chapters: int = Field(
+        ge=1, le=30,
+        description="生成章节数；上限 30，一次生成过多会变慢且后半段容易丢失一致性",
+    )
+    instructions: str = Field(
+        default="",
+        description="优化建议与限制，如「节奏再快些」「每章结尾留悬念」",
+    )
+    keep_existing: bool = Field(
+        default=True,
+        description="是否参考已有大纲的情节走向；false 表示可以完全重新设计",
+    )
+
+
+class OutlineDraftPayload(BaseModel):
+    """一条确认后的大纲草稿。"""
+
+    chapter_number: int
+    title: str = ""
+    summary: str = ""
+
+
+class OutlineApplyRequest(BaseModel):
+    drafts: List[OutlineDraftPayload] = Field(default_factory=list)

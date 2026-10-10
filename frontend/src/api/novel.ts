@@ -313,6 +313,29 @@ export interface RenameResult {
   new_version_ids: number[]
 }
 
+/** 一条待确认的大纲草稿。 */
+export interface OutlineDraft {
+  chapter_number: number
+  title: string
+  summary: string
+  existing_title: string | null
+  existing_summary: string | null
+  /** 该章已有正文：改大纲会造成新的不一致 */
+  has_prose: boolean
+  is_new: boolean
+  changed: boolean
+}
+
+export interface OutlineRegenPreview {
+  project_id: string
+  start_chapter: number
+  end_chapter: number
+  drafts: OutlineDraft[]
+  overwritten_chapters: number[]
+  chapters_with_prose: number[]
+  warnings: string[]
+}
+
 export interface ConsistencyReport {
   project_id: string
   blueprint_characters: string[]
@@ -629,6 +652,44 @@ export class NovelAPI {
     return request(`${WRITER_BASE}/${projectId}/chapters/delete`, {
       method: 'POST',
       body: JSON.stringify({ chapter_numbers: chapterNumbers })
+    })
+  }
+
+  /**
+   * 重新生成章节大纲（只产出草稿，不写入）。
+   *
+   * 与 generateChapterOutline 的区别：那个只能从末尾追加，
+   * 这个可以指定任意范围重做，并带优化建议。
+   */
+  static async regenerateOutline(
+    projectId: string,
+    options: {
+      start_chapter: number
+      num_chapters: number
+      instructions?: string
+      keep_existing?: boolean
+    }
+  ): Promise<OutlineRegenPreview> {
+    // 走流式端点：生成几十章耗时以分钟计，非流式会被代理掐断
+    return callLongTaskStream(
+      `${WRITER_BASE}/${projectId}/chapters/outline-regenerate`,
+      {
+        start_chapter: options.start_chapter,
+        num_chapters: options.num_chapters,
+        instructions: options.instructions ?? '',
+        keep_existing: options.keep_existing ?? true,
+      }
+    )
+  }
+
+  /** 把确认后的大纲草稿写入数据库。 */
+  static async applyRegeneratedOutline(
+    projectId: string,
+    drafts: Array<{ chapter_number: number; title: string; summary: string }>
+  ): Promise<{ created: number; updated: number }> {
+    return request(`${WRITER_BASE}/${projectId}/chapters/outline-regenerate/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ drafts })
     })
   }
 

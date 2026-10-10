@@ -6,7 +6,18 @@
         <h2 class="text-2xl font-bold text-slate-900">章节大纲</h2>
         <p class="text-sm text-slate-500">故事结构与章节节奏一目了然</p>
       </div>
-      <div v-if="editable" class="flex items-center gap-2">
+      <div v-if="editable" class="flex flex-wrap items-center gap-2">
+        <!-- AI 重新生成：原有能力只能从末尾追加，无法重做已有大纲 -->
+        <button
+          type="button"
+          class="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg"
+          @click="regenOpen = true"
+        >
+          <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" />
+          </svg>
+          AI 重新生成
+        </button>
         <button
           type="button"
           class="flex items-center gap-1 px-3 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-lg"
@@ -50,11 +61,22 @@
       </li>
       <li v-if="!outline.length" class="ml-6 text-slate-400 text-sm">暂无章节大纲</li>
     </ol>
+
+    <!-- AI 重新生成：范围 + 建议 → 预览 → 确认 -->
+    <OutlineRegenDialog
+      :show="regenOpen"
+      :project-id="projectId"
+      :existing-count="outline.length"
+      @close="regenOpen = false"
+      @applied="$emit('regenerated')"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { defineEmits, defineProps } from 'vue'
+import { defineEmits, defineProps, ref } from 'vue'
+import OutlineRegenDialog from '@/components/OutlineRegenDialog.vue'
+import { useRoute } from 'vue-router'
 
 interface OutlineItem {
   chapter_number: number
@@ -67,9 +89,14 @@ const props = defineProps<{
   editable?: boolean
 }>()
 
+const route = useRoute()
+const projectId = route.params.id as string
+const regenOpen = ref(false)
+
 const emit = defineEmits<{
   (e: 'edit', payload: { field: string; title: string; value: any }): void
   (e: 'add'): void
+  (e: 'regenerated'): void
 }>()
 
 const emitEdit = (field: string, title: string, value: any) => {

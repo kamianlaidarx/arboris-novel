@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
@@ -42,6 +42,8 @@ from ...schemas.novel import (
     NovelProject as NovelProjectSchema,
     SelectVersionRequest,
     UpdateChapterOutlineRequest,
+    OutlineRegenRequest,
+    OutlineApplyRequest,
 )
 from ...schemas.user import UserInDB
 from ...services.chapter_context_service import ChapterContextService
@@ -1287,6 +1289,8 @@ async def edit_chapter_content_fast(
 # ============================================================
 
 from ...utils.sse import register_stream_route as _register_stream_route
+from ...utils.sse import run_with_heartbeat, sse_response
+from ...services.outline_regen_service import OutlineRegenService
 
 _register_stream_route(
     router,
@@ -1315,3 +1319,76 @@ _register_stream_route(
     label="章节大纲生成",
     original=generate_chapters_outline,
 )
+
+
+# ============================================================
+# 章节大纲的按范围重新生成（预览 → 确认 → 应用）
+#
+# 原有端点只能【追加】：start_chapter = 现有数量 + 1，从最后一章往后接。
+# 于是蓝图改完之后，早先生成的大纲既无法推翻重来，也无法只重生某几章，
+# 更没法带优化建议去重生成——而「蓝图改了、大纲要重做」恰恰最常见。
+#
+# 这里把三步拆开：generate 只产出草稿不落库，前端展示新旧对比，
+# 用户确认后再调 apply。几十上百条大纲一次性覆盖是不可逆的，
+# 必须先让人过目。
+# ============================================================
+
+
+@router.post("/novels/{project_id}/chapters/outline-regenerate")
+async def regenerate_chapters_outline(
+    project_id: str,
+    request: OutlineRegenRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """生成大纲草稿（**不写入数据库**），返回新旧对比供确认。
+
+    用流式响应承载：一次可能生成几十章，耗时以分钟计，
+    非流式会被反向代理按源站等待上限掐断（Cloudflare 免费版 100 秒）。
+    """
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    prompt_service = PromptService(session)
+    llm_service = LLMService(session)
+    service = OutlineRegenService(session)
+
+    async def _work():
+        preview = await service.generate(
+            project_id,
+            start_chapter=request.start_chapter,
+            num_chapters=request.num_chapters,
+            instructions=request.instructions or "",
+            keep_existing=request.keep_existing,
+            llm_service=llm_service,
+            prompt_service=prompt_service,
+        )
+        return preview.to_dict()
+
+    async def _stream():
+        async for frame in run_with_heartbeat(
+            _work, on_done=lambda r: r, label="章节大纲重生成"
+        ):
+            yield frame
+
+    return sse_response(_stream())
+
+
+@router.post("/novels/{project_id}/chapters/outline-regenerate/apply")
+async def apply_regenerated_outline(
+    project_id: str,
+    request: OutlineApplyRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """把确认后的大纲草稿写入数据库。"""
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    service = OutlineRegenService(session)
+    drafts = [d.model_dump() for d in request.drafts]
+    try:
+        result = await service.apply(project_id, drafts)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result

@@ -159,6 +159,7 @@
                 :class="componentContainerClass"
                 @edit="handleSectionEdit"
                 @add="startAddChapter"
+                @regenerated="onOutlineRegenerated"
               />
             </div>
           </div>
@@ -538,6 +539,12 @@ const resolveSectionKey = (field: string): SectionKey => {
   if (field.startsWith('relationships')) return 'relationships'
   if (field.startsWith('chapter_outline')) return 'chapter_outline'
   return 'overview'
+}
+
+/** 大纲重生成后重新加载该区块，否则界面还是旧内容。 */
+const onOutlineRegenerated = async () => {
+  await loadSection('chapter_outline', true)
+  await loadSection('overview', true)
 }
 
 const handleSave = async (data: { field: string; content: any }) => {
