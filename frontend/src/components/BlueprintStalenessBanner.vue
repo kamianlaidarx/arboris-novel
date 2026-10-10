@@ -83,16 +83,44 @@
               <span v-if="item.outline_chapters.length" class="opacity-60">
                 章节 {{ formatRanges(item.outline_chapters) }}
               </span>
+              <!-- 逐条忽略：扫描有少量误报，必须能标记「这个不用管」 -->
+              <button
+                class="md-btn md-btn-text md-ripple !px-2 !py-0 text-xs"
+                :disabled="ignoring"
+                @click="ignoreOne(item.name)"
+              >忽略</button>
             </li>
           </ul>
 
-          <button
-            v-if="unknownNames.length > visibleCount && !showAll"
-            class="mt-2 md-btn md-btn-text md-ripple"
-            @click="showAll = true"
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              v-if="unknownNames.length > visibleCount && !showAll"
+              class="md-btn md-btn-text md-ripple"
+              @click="showAll = true"
+            >
+              显示全部 {{ unknownNames.length }} 个
+            </button>
+            <!-- 一键忽略全部：用于关掉整个对比提示 -->
+            <button
+              class="md-btn md-btn-outlined md-ripple"
+              :disabled="ignoring"
+              @click="ignoreAll"
+            >
+              {{ ignoring ? '处理中…' : `全部忽略（${unknownNames.length} 个）` }}
+            </button>
+          </div>
+
+          <!-- 已忽略的名字，可恢复 -->
+          <p
+            v-if="report?.ignored_names?.length"
+            class="mt-3 md-body-small"
+            style="color: var(--md-on-surface-variant);"
           >
-            显示全部 {{ unknownNames.length }} 个
-          </button>
+            已忽略 {{ report.ignored_names.length }} 个名字
+            <button class="md-btn md-btn-text md-ripple !px-2 !py-0 text-xs" @click="restoreAll">
+              恢复全部
+            </button>
+          </p>
 
           <!-- 当前蓝图角色，方便对照判断 -->
           <p
@@ -130,6 +158,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { NovelAPI } from '@/api/novel'
 import type { BlueprintStaleness, ConsistencyReport } from '@/api/novel'
 import CharacterRenameDialog from '@/components/CharacterRenameDialog.vue'
+import { globalAlert } from '@/composables/useAlert'
 
 const props = defineProps<{
   projectId: string
@@ -142,6 +171,7 @@ const report = ref<ConsistencyReport | null>(null)
 const expanded = ref(false)
 const showAll = ref(false)
 const renameDialogOpen = ref(false)
+const ignoring = ref(false)
 /** 列表默认只显示前几个：真正需要关注的通常是最靠前的（按出现次数排序） */
 const visibleCount = 5
 
@@ -194,5 +224,49 @@ watch(() => [props.projectId, props.refreshKey], load)
 const onRenameApplied = () => {
   expanded.value = false
   load()
+}
+
+/** 忽略单个名字（扫描误报时用）。 */
+const ignoreOne = async (name: string) => {
+  ignoring.value = true
+  try {
+    await NovelAPI.ignoreConsistencyNames(props.projectId, [name])
+    await load()
+  } catch (err) {
+    globalAlert.showError(err instanceof Error ? err.message : '忽略失败', '操作失败')
+  } finally {
+    ignoring.value = false
+  }
+}
+
+/** 忽略全部：一键关掉整个对比提示。 */
+const ignoreAll = async () => {
+  if (!unknownNames.value.length) return
+  ignoring.value = true
+  try {
+    // 传空数组 = 忽略当前所有可疑名字，由后端决定具体名单，
+    // 避免前后端对「全部」的理解不一致
+    await NovelAPI.ignoreConsistencyNames(props.projectId, [])
+    showAll.value = false
+    expanded.value = false
+    await load()
+  } catch (err) {
+    globalAlert.showError(err instanceof Error ? err.message : '忽略失败', '操作失败')
+  } finally {
+    ignoring.value = false
+  }
+}
+
+/** 清空忽略名单，让所有名字重新参与检测。 */
+const restoreAll = async () => {
+  ignoring.value = true
+  try {
+    await NovelAPI.unignoreConsistencyNames(props.projectId, [])
+    await load()
+  } catch (err) {
+    globalAlert.showError(err instanceof Error ? err.message : '恢复失败', '操作失败')
+  } finally {
+    ignoring.value = false
+  }
 }
 </script>

@@ -101,6 +101,8 @@ class ConsistencyReport:
     unknown_names: List[NameMention] = field(default_factory=list)
     #: 蓝图里有、但从未在大纲或正文中出现的角色
     unused_characters: List[str] = field(default_factory=list)
+    #: 用户手动忽略的名字（扫描结果里已排除）
+    ignored_names: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -108,6 +110,7 @@ class ConsistencyReport:
             "blueprint_characters": self.blueprint_characters,
             "unknown_names": [n.to_dict() for n in self.unknown_names],
             "unused_characters": self.unused_characters,
+            "ignored_names": self.ignored_names,
         }
 
 
@@ -154,6 +157,42 @@ class BlueprintStalenessService:
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def get_ignored_names(self, project_id: str) -> set:
+        """取用户手动忽略的名字集合。"""
+        raw = (
+            await self.session.execute(
+                select(NovelBlueprint.ignored_names).where(
+                    NovelBlueprint.project_id == project_id
+                )
+            )
+        ).scalar_one_or_none()
+        if not raw:
+            return set()
+        return {str(n).strip() for n in raw if str(n).strip()}
+
+    async def ignore_names(self, project_id: str, names: Sequence[str]) -> List[str]:
+        """把名字加入忽略名单，返回更新后的完整名单。"""
+        record = await self.session.get(NovelBlueprint, project_id)
+        if record is None:
+            return []
+        current = {str(n).strip() for n in (record.ignored_names or []) if str(n).strip()}
+        current.update(n.strip() for n in names if n and n.strip())
+        # 重新赋值以触发 SQLAlchemy 的变更检测（JSON 列原地修改不会被察觉）
+        record.ignored_names = sorted(current)
+        await self.session.commit()
+        return record.ignored_names
+
+    async def unignore_names(self, project_id: str, names: Sequence[str]) -> List[str]:
+        """从忽略名单移除名字。"""
+        record = await self.session.get(NovelBlueprint, project_id)
+        if record is None:
+            return []
+        current = {str(n).strip() for n in (record.ignored_names or []) if str(n).strip()}
+        current.difference_update(n.strip() for n in names)
+        record.ignored_names = sorted(current)
+        await self.session.commit()
+        return record.ignored_names
 
     async def get_report(self, project_id: str) -> StalenessReport:
         """生成过期报告。
@@ -282,8 +321,11 @@ class BlueprintStalenessService:
                         entry.chapter_numbers.append(number)
             mentions[name] = entry
 
+        # 过滤用户手动忽略的名字：扫描会有少量误报（普通词恰好以姓氏字
+        # 开头），若不允许忽略，告警永远清不掉，用户最终会无视整个提示。
+        ignored = await self.get_ignored_names(project_id)
         unknown = sorted(
-            mentions.values(),
+            (m for m in mentions.values() if m.name not in ignored),
             key=lambda m: (-(m.outline_count + m.chapter_count), m.name),
         )
 
@@ -300,6 +342,7 @@ class BlueprintStalenessService:
             blueprint_characters=known,
             unknown_names=unknown[:50],  # 上限避免响应过大
             unused_characters=unused,
+            ignored_names=sorted(ignored),
         )
 
 

@@ -111,15 +111,23 @@ async def test_preview_reports_locations_and_samples(session):
 
 # ==================================================== 安全护栏
 
-async def test_rejects_merging_two_existing_characters(session):
-    """新名已是蓝图角色 → 拒绝：替换会把两个角色合并，几乎总是误操作。"""
+async def test_allows_mapping_old_name_onto_blueprint_character(session):
+    """主要用法：把过期旧名对齐到当前蓝图角色，必须允许。
+
+    蓝图主角是「李明」，而大纲里还写着改名前的「陆行舟」，
+    用户填「陆行舟 → 李明」正是要修正这个不一致。
+
+    早期版本错误地拒绝了它（理由是「会把两个角色合并」），
+    导致用户做任何有意义的改名都得到「没有找到可替换的内容」。
+    合并只会发生在【新旧名都是蓝图角色】时，这里旧名根本不是蓝图角色。
+    """
     await _chars(session, ["李明", "苏宛"])
     await _outline(session, 1, "第一章", "陆行舟出场")
 
     preview = await CharacterRenameService(session).preview("p1", {"陆行舟": "李明"})
-    assert preview.mapping == {}
-    assert preview.rejected
-    assert "已是当前蓝图中的角色" in preview.rejected[0]["reason"]
+    assert preview.mapping == {"陆行舟": "李明"}
+    assert not preview.rejected
+    assert preview.total_replacements > 0
 
 
 async def test_rejects_renaming_current_blueprint_character(session):
@@ -129,7 +137,7 @@ async def test_rejects_renaming_current_blueprint_character(session):
 
     preview = await CharacterRenameService(session).preview("p1", {"陆行舟": "王五"})
     assert preview.mapping == {}
-    assert "仍是蓝图中的角色" in preview.rejected[0]["reason"]
+    assert "仍是当前蓝图中的角色" in preview.rejected[0]["reason"]
 
 
 async def test_rejects_identical_names(session):
@@ -146,7 +154,8 @@ async def test_apply_refuses_when_any_mapping_rejected(session):
 
     svc = CharacterRenameService(session)
     with pytest.raises(ValueError):
-        await svc.apply("p1", {"陆行舟": "李明", "旧名": "王五"})
+        # 李明是蓝图角色 → 作为旧名会被拒，整批不执行
+        await svc.apply("p1", {"陆行舟": "王五", "李明": "赵六"})
 
     # 一个都不该改
     o = (await session.execute(

@@ -103,6 +103,10 @@ class NovelBlueprint(Base):
     # 保存时先比对指纹，只有内容真的变了才递增 revision——否则前端
     # 「打开编辑器→直接保存」就会把全部章节误标为过期，提示沦为噪音。
     content_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # 用户手动忽略的名字列表。
+    # 一致性扫描会报出少量误报（普通词恰好以姓氏字开头，如「印司」「寿数」），
+    # 让用户能标记「这个名字不用管」，否则告警永远清不掉，最终被无视。
+    ignored_names: Mapped[Optional[list]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

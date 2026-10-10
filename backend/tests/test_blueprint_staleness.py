@@ -380,3 +380,62 @@ async def test_outline_revision_stamped_even_without_bump(session):
     )).scalars().one()
     assert outline.blueprint_revision is not None, "只传大纲时也必须标记版本号"
     assert outline.blueprint_revision == await svc.get_blueprint_revision("p1")
+
+
+# ==================================================== 忽略名单
+
+async def test_ignored_names_excluded_from_scan(session):
+    """忽略后的名字不再出现在扫描结果里。
+
+    扫描会有少量误报（普通词恰好以姓氏字开头），若不能忽略，
+    告警永远清不掉，用户最终会无视整个提示。
+    """
+    await _add_chars(session, ["陆沉"])
+    for i, text in enumerate(["陆行舟出场", "陆行舟开口", "陆行舟转身", "陆行舟沉默"], start=1):
+        await _add_outline(session, i, f"第{i}章", text, 1)
+
+    svc = BlueprintStalenessService(session)
+    before = await svc.scan_names("p1")
+    assert any(n.name == "陆行舟" for n in before.unknown_names)
+
+    await svc.ignore_names("p1", ["陆行舟"])
+
+    after = await svc.scan_names("p1")
+    assert not any(n.name == "陆行舟" for n in after.unknown_names)
+    assert "陆行舟" in after.ignored_names
+
+
+async def test_ignore_is_idempotent_and_accumulates(session):
+    await _add_chars(session, ["陆沉"])
+    svc = BlueprintStalenessService(session)
+
+    await svc.ignore_names("p1", ["甲"])
+    await svc.ignore_names("p1", ["甲", "乙"])   # 重复加甲
+    names = await svc.get_ignored_names("p1")
+    assert names == {"甲", "乙"}, f"应去重累积，实际 {names}"
+
+
+async def test_unignore_restores_name(session):
+    await _add_chars(session, ["陆沉"])
+    for i, text in enumerate(["陆行舟出场", "陆行舟开口", "陆行舟转身"], start=1):
+        await _add_outline(session, i, f"第{i}章", text, 1)
+
+    svc = BlueprintStalenessService(session)
+    await svc.ignore_names("p1", ["陆行舟"])
+    assert not any(n.name == "陆行舟" for n in (await svc.scan_names("p1")).unknown_names)
+
+    await svc.unignore_names("p1", ["陆行舟"])
+    assert any(n.name == "陆行舟" for n in (await svc.scan_names("p1")).unknown_names)
+
+
+async def test_ignore_survives_blueprint_change(session):
+    """忽略名单不应因为改蓝图而丢失（它是用户偏好，不是内容）。"""
+    await _add_chars(session, ["陆沉"])
+    svc = BlueprintStalenessService(session)
+    await svc.ignore_names("p1", ["某词"])
+
+    novel = NovelService(session)
+    await novel.bump_blueprint_revision_if_changed("p1")
+    await session.commit()
+
+    assert await svc.get_ignored_names("p1") == {"某词"}

@@ -319,6 +319,8 @@ export interface ConsistencyReport {
   unknown_names: UnknownName[]
   /** 蓝图里有、但从未在大纲或正文中出现的角色 */
   unused_characters: string[]
+  /** 用户手动忽略的名字（已从 unknown_names 里排除） */
+  ignored_names: string[]
 }
 
 // API 函数
@@ -366,6 +368,33 @@ export class NovelAPI {
    */
   static async getStaleness(projectId: string): Promise<BlueprintStaleness> {
     return request(`${NOVELS_BASE}/${projectId}/staleness`)
+  }
+
+  /**
+   * 忽略某些名字，之后扫描不再报出。
+   *
+   * 扫描有少量误报（普通词恰好以姓氏字开头）。若不能忽略，告警永远
+   * 清不掉，用户最终会无视整个提示。传空数组表示忽略全部当前可疑名字。
+   */
+  static async ignoreConsistencyNames(
+    projectId: string,
+    names: string[] = []
+  ): Promise<{ ignored_names: string[]; ignored_count: number }> {
+    return request(`${NOVELS_BASE}/${projectId}/consistency-report/ignore`, {
+      method: 'POST',
+      body: JSON.stringify({ names })
+    })
+  }
+
+  /** 取消忽略；传空数组表示清空整个忽略名单。 */
+  static async unignoreConsistencyNames(
+    projectId: string,
+    names: string[] = []
+  ): Promise<{ ignored_names: string[] }> {
+    return request(`${NOVELS_BASE}/${projectId}/consistency-report/unignore`, {
+      method: 'POST',
+      body: JSON.stringify({ names })
+    })
   }
 
   /**

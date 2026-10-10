@@ -149,21 +149,24 @@ class CharacterRenameService:
     ) -> Tuple[Dict[str, str], List[Dict[str, str]], List[str]]:
         """校验映射，返回 (可用映射, 被拒项, 警告)。
 
-        拒绝的情况：
-          - 旧名与新名相同（无意义）
-          - 新名已经是本项目另一个角色（会把两个角色合并，几乎总是误操作）
-          - 旧名本身是当前蓝图里的角色（说明用户想改的是「蓝图里的名字」，
-            那应该去改蓝图，而不是替换下游文本）
+        **唯一的核心拒绝条件是「旧名仍是蓝图角色」。**
 
-        警告（不阻塞）：
-          - 新名已在下游文本里出现（替换后可能出现重名段落）
+        为什么：本功能处理的是「下游文本用的还是旧名字」这一情形。
+        如果旧名仍挂在蓝图里，说明用户想改的是蓝图本身，
+        那应该去「主要角色」里改，而不是替换几十万字的正文。
+
+        为什么**不**拒绝「新名已是蓝图角色」：这恰恰是主要用法。
+        蓝图主角叫「沈渡」，而 82 条大纲里写的是改名前的「陆行舟」，
+        用户填「陆行舟 → 沈渡」正是要让旧文本对齐当前蓝图。
+        早期版本错误地拒绝了这一情形，导致用户做任何有意义的改名
+        都会得到「没有找到可替换的内容」。
         """
-        characters = (
+        exists = (
             await self.session.execute(
                 select(NovelProject.id).where(NovelProject.id == project_id)
             )
         ).scalar_one_or_none()
-        if characters is None:
+        if exists is None:
             return {}, [], []
 
         from ..models.novel import BlueprintCharacter
@@ -186,20 +189,18 @@ class CharacterRenameService:
             if old == new:
                 rejected.append({"old": old, "new": new, "reason": "新旧名字相同，无需替换"})
                 continue
-            if new in current_names:
-                rejected.append({
-                    "old": old,
-                    "new": new,
-                    "reason": f"「{new}」已是当前蓝图中的角色，替换会把两个角色合并",
-                })
-                continue
             if old in current_names:
                 rejected.append({
                     "old": old,
                     "new": new,
-                    "reason": f"「{old}」仍是蓝图中的角色，请先在蓝图里改名",
+                    "reason": (
+                        f"「{old}」仍是当前蓝图中的角色。请先在「主要角色」里改蓝图，"
+                        "而不是替换下游文本"
+                    ),
                 })
                 continue
+            # 注意：这里刻意不检查「新名是否已是蓝图角色」。
+            # 那是主要用法（把旧文本对齐当前蓝图），不是错误。
             accepted[old] = new
 
         return accepted, rejected, warnings

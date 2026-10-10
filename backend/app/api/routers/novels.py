@@ -13,6 +13,7 @@ from ...schemas.novel import (
     Blueprint,
     BlueprintGenerateRequest,
     CharacterRenameRequest,
+    IgnoreNamesRequest,
     BlueprintGenerationResponse,
     BlueprintPatch,
     Chapter as ChapterSchema,
@@ -26,6 +27,7 @@ from ...schemas.novel import (
 from ...schemas.user import UserInDB
 from ...services.import_service import ImportService
 from ...services.llm_service import LLMService
+from ...models.novel import NovelBlueprint
 from ...services.blueprint_staleness_service import BlueprintStalenessService
 from ...services.character_rename_service import CharacterRenameService
 from ...services.novel_service import NovelService
@@ -691,3 +693,52 @@ async def apply_character_rename(
         # 映射校验失败属于用户可修正的输入问题，返回 400 而不是 500
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result.to_dict()
+
+
+@router.post("/{project_id}/consistency-report/ignore")
+async def ignore_consistency_names(
+    project_id: str,
+    payload: IgnoreNamesRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """把名字加入忽略名单，之后扫描不再报出。
+
+    为什么需要：扫描会有少量误报（普通词恰好以姓氏字开头，如「印司」「寿数」）。
+    若不能忽略，告警永远清不掉，用户最终会无视整个提示——那这个功能
+    就白做了。``names`` 为空时表示「全部忽略」，用于一键关闭对比页面。
+    """
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    service = BlueprintStalenessService(session)
+    names = [n for n in (payload.names or []) if n and n.strip()]
+    if not names:
+        # 空列表 = 忽略当前所有可疑名字
+        report = await service.scan_names(project_id)
+        names = [n.name for n in report.unknown_names]
+    ignored = await service.ignore_names(project_id, names)
+    return {"ignored_names": ignored, "ignored_count": len(names)}
+
+
+@router.post("/{project_id}/consistency-report/unignore")
+async def unignore_consistency_names(
+    project_id: str,
+    payload: IgnoreNamesRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """从忽略名单移除；``names`` 为空时清空整个名单。"""
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    service = BlueprintStalenessService(session)
+    names = [n for n in (payload.names or []) if n and n.strip()]
+    if not names:
+        record = await session.get(NovelBlueprint, project_id)
+        if record is not None:
+            record.ignored_names = []
+            await session.commit()
+        return {"ignored_names": []}
+    ignored = await service.unignore_names(project_id, names)
+    return {"ignored_names": ignored}

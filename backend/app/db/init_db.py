@@ -171,6 +171,10 @@ async def _ensure_schema_updates() -> None:
                 sync_conn.execute(
                     text("ALTER TABLE novel_blueprints ADD COLUMN content_fingerprint VARCHAR(64)")
                 )
+            if "ignored_names" not in bp_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE novel_blueprints ADD COLUMN ignored_names JSON")
+                )
             if "blueprint_revision" not in columns:
                 sync_conn.execute(
                     text("ALTER TABLE chapter_outlines ADD COLUMN blueprint_revision INTEGER")

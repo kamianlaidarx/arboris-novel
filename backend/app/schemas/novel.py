@@ -270,3 +270,12 @@ class CharacterRenameRequest(BaseModel):
         default=True,
         description="是否替换正文；false 表示只改大纲",
     )
+
+
+class IgnoreNamesRequest(BaseModel):
+    """忽略/取消忽略某些名字。
+
+    ``names`` 为空表示对**全部**当前可疑名字生效——用于一键关闭对比页面。
+    """
+
+    names: List[str] = Field(default_factory=list)
