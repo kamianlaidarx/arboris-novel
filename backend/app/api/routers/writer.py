@@ -179,14 +179,66 @@ async def _rewrite_with_guardrails(
     chapter_mission: Optional[dict],
     violations_text: str,
     user_id: int,
-) -> str:
-    """
-    使用护栏修复提示词重写违规内容
+) -> Optional[str]:
+    """用护栏修复提示词重写违规内容。
+
+    返回修复后的正文；**失败时返回 None**，由调用方决定如何处理。
+
+    此前这个函数是截断的：只处理了「提示词未配置」的分支，之后就结束了，
+    于是隐式返回 None。而调用方直接把返回值当作正文往下传，最终把
+    ``{"content": null, ...}`` 这样的内部结构当成章节正文存进了版本表，
+    界面上显示成一串 JSON，字数统计还把它算了进去。
+
+    这里把「修复失败」与「修复成功」区分开：拿不到可用结果就返回 None，
+    调用方退回使用原文——**修复是尽力而为，不能因为修复失败而丢掉正文**。
     """
     rewrite_prompt = await prompt_service.get_prompt("rewrite_guardrails")
     if not rewrite_prompt:
         logger.warning("未配置 rewrite_guardrails 提示词，跳过自动修复")
         return original_text
+
+    mission_text = ""
+    if chapter_mission:
+        try:
+            mission_text = json.dumps(chapter_mission, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            mission_text = str(chapter_mission)
+
+    prompt_input = (
+        f"[原文]\n{original_text}\n\n"
+        f"[章节导演脚本]\n{mission_text or '（无）'}\n\n"
+        f"[违规列表]\n{violations_text}\n"
+    )
+
+    try:
+        response = await llm_service.get_llm_response(
+            system_prompt=rewrite_prompt,
+            conversation_history=[{"role": "user", "content": prompt_input}],
+            temperature=0.4,
+            user_id=user_id,
+            timeout=600.0,
+            response_format=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - 修复失败不应中断生成
+        logger.warning("护栏自动修复调用失败，保留原文: %s", exc)
+        return None
+
+    rewritten = remove_think_tags(response or "").strip()
+    if not rewritten:
+        logger.warning("护栏自动修复返回空内容，保留原文")
+        return None
+
+    # 修复结果明显短于原文时视为异常：模型可能只回了一段说明而非正文。
+    # 直接采用会把正文截断，比不修复更糟。
+    if len(rewritten) < len(original_text) * 0.5:
+        logger.warning(
+            "护栏自动修复结果过短（原文 %d 字，修复后 %d 字），保留原文",
+            len(original_text),
+            len(rewritten),
+        )
+        return None
+
+    return rewritten
 
 
 async def _refresh_edit_summary_and_ingest(
@@ -711,7 +763,7 @@ async def generate_chapter(
 
                 # 尝试自动修复
                 violations_text = guardrails.format_violations_for_rewrite(guardrail_result)
-                final_content = await _rewrite_with_guardrails(
+                rewritten = await _rewrite_with_guardrails(
                     llm_service=llm_service,
                     prompt_service=prompt_service,
                     original_text=normalized,
@@ -719,6 +771,19 @@ async def generate_chapter(
                     violations_text=violations_text,
                     user_id=current_user.id,
                 )
+                # 修复失败时保留原文。护栏只是「尽力修正」，
+                # 不能因为修复没成功就把正文弄丢——此前这里不校验返回值，
+                # None 被一路当成正文，最终把内部结构存进了版本表。
+                if rewritten:
+                    final_content = rewritten
+                else:
+                    logger.warning(
+                        "项目 %s 第 %s 章版本 %s 自动修复未产出可用内容，保留原文",
+                        project_id,
+                        request.chapter_number,
+                        idx + 1,
+                    )
+                    final_content = normalized
 
             def _extract_text(value: object) -> Optional[str]:
                 if not value:
@@ -747,8 +812,33 @@ async def generate_chapter(
             except Exception:
                 parsed_json = None
 
+            # 正文为空时必须让这一版失败，而不是把内部结构当正文存下去。
+            # 此前是 `extracted_text or final_content`：当模型没吐出可用正文时，
+            # final_content 是一份内部 JSON（含 guardrail/chapter_mission 等），
+            # 于是它被当作章节正文写进版本表——界面显示成一串 JSON，
+            # 字数统计还把它算了进去，用户以为生成成功了。
+            content_for_version = extracted_text
+            if content_for_version is None and parsed_json is None:
+                # 不是 JSON，那就是模型直接输出的正文
+                content_for_version = final_content
+            if not content_for_version or not str(content_for_version).strip():
+                logger.error(
+                    "项目 %s 第 %s 章版本 %s 未产出可用正文（final_content 类型=%s）",
+                    project_id,
+                    request.chapter_number,
+                    idx + 1,
+                    type(final_content).__name__,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"第 {idx + 1} 个版本未生成出有效正文"
+                        "（可能触发了内容护栏且自动修复未成功）。请重试。"
+                    ),
+                )
+
             return {
-                "content": extracted_text or final_content,
+                "content": content_for_version,
                 "parsed_json": parsed_json,
                 "guardrail": guardrail_metadata,
                 "chapter_mission": chapter_mission,
