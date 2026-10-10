@@ -94,6 +94,15 @@ class NovelBlueprint(Base):
     one_sentence_summary: Mapped[Optional[str]] = mapped_column(Text)
     full_synopsis: Mapped[Optional[str]] = mapped_column(LONG_TEXT_TYPE)
     world_setting: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    # 蓝图版本号：任何会改变「下游该长什么样」的修改都递增。
+    # 大纲和章节生成时记录当时的 revision，之后比对就能知道哪些产物已过期。
+    # 为什么用递增整数而不是时间戳：时间戳比较依赖时钟，且无法区分
+    # 「同一秒内的两次修改」；整数只需等值比较，语义也直白。
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # 影响下游生成的那部分内容的指纹（角色/世界观/概要，不含书名等元信息）。
+    # 保存时先比对指纹，只有内容真的变了才递增 revision——否则前端
+    # 「打开编辑器→直接保存」就会把全部章节误标为过期，提示沦为噪音。
+    content_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -146,6 +155,9 @@ class ChapterOutline(Base):
     summary: Mapped[Optional[str]] = mapped_column(Text)
     metadata_: Mapped[Optional[dict]] = mapped_column("metadata", JSON)  # 存储导演脚本/节拍状态
     metadata = _MetadataAccessor()
+    # 生成这条大纲时的蓝图版本。与 NovelBlueprint.revision 不等即为过期。
+    # 可空：历史数据没有这个信息，NULL 表示「未知」，不能当成过期来报。
+    blueprint_revision: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     project: Mapped[NovelProject] = relationship(back_populates="outlines")
 
@@ -168,6 +180,9 @@ class Chapter(Base):
     selected_version_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("chapter_versions.id", ondelete="SET NULL"), nullable=True
     )
+    # 生成这一章正文时的蓝图版本。与 NovelBlueprint.revision 不等即为过期。
+    # 可空：历史数据没有这个信息，NULL 表示「未知」，不能当成过期来报。
+    blueprint_revision: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

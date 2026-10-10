@@ -258,6 +258,69 @@ export interface NovelSectionResponse {
   data: Record<string, any>
 }
 
+/** 蓝图变更后，哪些产物已过期。只读报告，不包含任何修改动作。 */
+export interface BlueprintStaleness {
+  project_id: string
+  current_revision: number
+  has_stale: boolean
+  /** 基于旧蓝图生成的大纲章节号 */
+  stale_outline_chapters: number[]
+  /** 基于旧蓝图生成的章节号 */
+  stale_chapter_numbers: number[]
+  /** 没有版本信息的历史数据（无法判断，不算过期） */
+  unknown_outline_chapters: number[]
+  unknown_chapter_numbers: number[]
+  stale_outline_count: number
+  stale_chapter_count: number
+}
+
+/** 大纲/正文里出现、但不在当前蓝图角色表中的名字。 */
+export interface UnknownName {
+  name: string
+  outline_count: number
+  chapter_count: number
+  outline_chapters: number[]
+  chapter_numbers: number[]
+}
+
+/** 改名预览里的一处改动。 */
+export interface RenameOccurrence {
+  chapter_number: number
+  target: 'outline' | 'prose'
+  count: number
+  samples: string[]
+}
+
+export interface RenamePreview {
+  project_id: string
+  /** 通过校验的映射（被拒项不在其中） */
+  mapping: Record<string, string>
+  occurrences: RenameOccurrence[]
+  total_replacements: number
+  affected_outline_chapters: number[]
+  affected_chapter_numbers: number[]
+  /** 被拒绝的映射及原因 */
+  rejected: Array<{ old: string; new: string; reason: string }>
+  warnings: string[]
+}
+
+export interface RenameResult {
+  project_id: string
+  mapping: Record<string, string>
+  outlines_updated: number
+  chapters_updated: number
+  replacements: number
+  new_version_ids: number[]
+}
+
+export interface ConsistencyReport {
+  project_id: string
+  blueprint_characters: string[]
+  unknown_names: UnknownName[]
+  /** 蓝图里有、但从未在大纲或正文中出现的角色 */
+  unused_characters: string[]
+}
+
 // API 函数
 const NOVELS_BASE = `${API_BASE_URL}${API_PREFIX}/novels`
 const WRITER_PREFIX = '/api/writer'
@@ -293,6 +356,58 @@ export class NovelAPI {
 
   static async getSection(projectId: string, section: NovelSectionType): Promise<NovelSectionResponse> {
     return request(`${NOVELS_BASE}/${projectId}/sections/${section}`)
+  }
+
+  /**
+   * 查询哪些大纲/章节是基于旧蓝图生成的。
+   *
+   * 蓝图改过之后，早先生成的产物仍是旧蓝图的产物，但系统里原本没有
+   * 地方记录这件事。这个接口只做标记，不改动任何内容。
+   */
+  static async getStaleness(projectId: string): Promise<BlueprintStaleness> {
+    return request(`${NOVELS_BASE}/${projectId}/staleness`)
+  }
+
+  /**
+   * 预览角色改名会改动哪些地方（不写入任何数据）。
+   *
+   * 必须预览：中文名字歧义多（「苏宛」vs「苏晚」一字之差；
+   * 「陆行舟」可能被写作「行舟」），盲替会把改名字变成改坏正文。
+   */
+  static async previewCharacterRename(
+    projectId: string,
+    mapping: Record<string, string>
+  ): Promise<RenamePreview> {
+    return request(`${NOVELS_BASE}/${projectId}/rename-characters/preview`, {
+      method: 'POST',
+      body: JSON.stringify({ mapping })
+    })
+  }
+
+  /**
+   * 应用角色改名。
+   *
+   * 正文改动会新建版本而非覆盖，原稿可回退。
+   */
+  static async applyCharacterRename(
+    projectId: string,
+    mapping: Record<string, string>,
+    includeProse = true
+  ): Promise<RenameResult> {
+    return request(`${NOVELS_BASE}/${projectId}/rename-characters/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ mapping, include_prose: includeProse })
+    })
+  }
+
+  /**
+   * 扫描大纲与正文里「不在当前蓝图角色表中」的名字。
+   *
+   * 只读接口。名字存在歧义时（蓝图「苏宛」vs 大纲「苏晚」）
+   * 只有作者知道正确答案，所以这里只列出可疑项和出现位置。
+   */
+  static async getConsistencyReport(projectId: string): Promise<ConsistencyReport> {
+    return request(`${NOVELS_BASE}/${projectId}/consistency-report`)
   }
 
   static async converseConcept(

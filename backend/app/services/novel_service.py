@@ -1,6 +1,7 @@
 # AIMETA P=小说服务_小说管理业务逻辑|R=小说CRUD_章节管理|NR=不含内容生成|E=NovelService|X=internal|A=服务类|D=sqlalchemy|S=db|RD=./README.ai
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -312,8 +313,132 @@ class NovelService:
                 )
             )
 
+        # 蓝图被整份替换（含重新生成），版本号必然变化。
+        # 此时刚写入的大纲是从新蓝图直接派生的，标记为「当前版本」；
+        # 而已有章节正文不会被重建，比对时会被识别为过期——这正是想要的效果。
+        record.revision = (record.revision or 1) + 1
+        record.content_fingerprint = await self._compute_blueprint_fingerprint(project_id)
+        new_revision = record.revision
+
+        await self.session.execute(
+            update(ChapterOutline)
+            .where(ChapterOutline.project_id == project_id)
+            .values(blueprint_revision=new_revision)
+        )
         await self.session.commit()
         await self._touch_project(project_id)
+
+    # ------------------------------------------------------------------
+    # 蓝图版本追踪
+    #
+    # 解决的问题：蓝图改过之后，早先生成的大纲和章节正文仍是旧蓝图的产物，
+    # 但系统里没有任何地方记录这件事。实测一个项目里，蓝图角色是
+    # [沈渡/苏宛/方规/陆沉/齐延年]，而 82 条大纲和正文用的是
+    # 「陆行舟」「苏晚」—— 重叠为零，用户只能自己发现。
+    #
+    # 做法：给蓝图一个递增的 revision，大纲/章节生成时记录当时的版本号，
+    # 比对不等即为「已过期」。只做标记，不自动改动任何下游内容。
+    # ------------------------------------------------------------------
+
+    async def get_blueprint_revision(self, project_id: str) -> int:
+        """取当前蓝图版本号；没有蓝图时返回 0。"""
+        revision = (
+            await self.session.execute(
+                select(NovelBlueprint.revision).where(NovelBlueprint.project_id == project_id)
+            )
+        ).scalar_one_or_none()
+        return int(revision) if revision is not None else 0
+
+    async def _compute_blueprint_fingerprint(self, project_id: str) -> str:
+        """把「会影响下游生成」的蓝图内容算成一个指纹。
+
+        只纳入真正影响正文的字段（角色、世界观、故事概要），
+        刻意排除 title / target_audience 这类纯元信息——
+        改个书名不该让 82 章大纲全部标记为过期，否则这个提示会
+        因为噪音太多而被用户忽略，失去意义。
+
+        角色按 position 排序后逐个序列化，保证顺序稳定。
+        """
+        blueprint = await self.session.get(NovelBlueprint, project_id)
+        characters = (
+            await self.session.execute(
+                select(BlueprintCharacter)
+                .where(BlueprintCharacter.project_id == project_id)
+                .order_by(BlueprintCharacter.position)
+            )
+        ).scalars().all()
+        relationships = (
+            await self.session.execute(
+                select(BlueprintRelationship)
+                .where(BlueprintRelationship.project_id == project_id)
+                .order_by(BlueprintRelationship.position)
+            )
+        ).scalars().all()
+
+        payload = {
+            "one_sentence_summary": (blueprint.one_sentence_summary if blueprint else "") or "",
+            "full_synopsis": (blueprint.full_synopsis if blueprint else "") or "",
+            "genre": (blueprint.genre if blueprint else "") or "",
+            "style": (blueprint.style if blueprint else "") or "",
+            "tone": (blueprint.tone if blueprint else "") or "",
+            "world_setting": (blueprint.world_setting if blueprint else None) or {},
+            "characters": [
+                {
+                    "name": c.name or "",
+                    "identity": c.identity or "",
+                    "personality": c.personality or "",
+                    "goals": c.goals or "",
+                    "abilities": c.abilities or "",
+                    "relationship_to_protagonist": c.relationship_to_protagonist or "",
+                }
+                for c in characters
+            ],
+            "relationships": [
+                {
+                    "from": r.character_from or "",
+                    "to": r.character_to or "",
+                    "description": r.description or "",
+                }
+                for r in relationships
+            ],
+        }
+        blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    async def bump_blueprint_revision_if_changed(self, project_id: str) -> bool:
+        """内容真的变了才递增版本号。
+
+        为什么要比对指纹而不是每次保存都递增：前端保存角色时会把整份
+        数据重发一遍，即使用户什么都没改。若每次都递增，用户只要打开
+        编辑器点一下保存，全部章节就会被标记为「过期」——提示会迅速
+        变成噪音。
+
+        返回 True 表示版本号发生了变化。
+        """
+        record = await self.session.get(NovelBlueprint, project_id)
+        if record is None:
+            return False
+
+        fingerprint = await self._compute_blueprint_fingerprint(project_id)
+        if record.content_fingerprint == fingerprint:
+            return False
+
+        record.content_fingerprint = fingerprint
+        record.revision = (record.revision or 1) + 1
+        return True
+
+    async def mark_outline_revision(self, project_id: str, chapter_number: int, revision: int) -> None:
+        """记录某条大纲是基于哪个蓝图版本生成的。"""
+        outline = (
+            await self.session.execute(
+                select(ChapterOutline).where(
+                    ChapterOutline.project_id == project_id,
+                    ChapterOutline.chapter_number == chapter_number,
+                )
+            )
+        ).scalars().first()
+        if outline is not None:
+            outline.blueprint_revision = revision
 
     async def _sync_relationship_names(
         self,
@@ -466,6 +591,20 @@ class NovelService:
                         summary=outline.get("summary"),
                     )
                 )
+        # 内容真的变了才递增版本号：前端保存角色时会把整份数据重发，
+        # 若每次都递增，用户「打开编辑器→直接保存」就会让全部章节
+        # 被标记为过期，提示会迅速沦为噪音。
+        await self.bump_blueprint_revision_if_changed(project_id)
+        # 本次写了大纲，就把它标记为「照当前蓝图写的」——与版本号是否
+        # 递增无关。早期写成「只有递增时才标记」，结果第二次 patch 只传
+        # 大纲时指纹未变、不递增，大纲的版本号就一直是空，永远归入
+        # 「未知」而不是「过期」，等于这个提示对大纲完全失效。
+        if patch.get("chapter_outline") is not None:
+            await self.session.execute(
+                update(ChapterOutline)
+                .where(ChapterOutline.project_id == project_id)
+                .values(blueprint_revision=await self.get_blueprint_revision(project_id))
+            )
         await self.session.commit()
         await self._touch_project(project_id)
 

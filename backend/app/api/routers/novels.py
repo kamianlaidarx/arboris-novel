@@ -12,6 +12,7 @@ from ...db.session import get_session
 from ...schemas.novel import (
     Blueprint,
     BlueprintGenerateRequest,
+    CharacterRenameRequest,
     BlueprintGenerationResponse,
     BlueprintPatch,
     Chapter as ChapterSchema,
@@ -25,6 +26,8 @@ from ...schemas.novel import (
 from ...schemas.user import UserInDB
 from ...services.import_service import ImportService
 from ...services.llm_service import LLMService
+from ...services.blueprint_staleness_service import BlueprintStalenessService
+from ...services.character_rename_service import CharacterRenameService
 from ...services.novel_service import NovelService
 from ...services.prompt_service import PromptService
 from ...utils.json_utils import remove_think_tags, sanitize_json_like_text, unwrap_markdown_json
@@ -577,3 +580,114 @@ async def patch_blueprint(
     await novel_service.patch_blueprint(project_id, update_data)
     logger.info("项目 %s 局部更新蓝图字段：%s", project_id, list(update_data.keys()))
     return await novel_service.get_project_schema(project_id, current_user.id)
+
+
+# ============================================================
+# 蓝图变更的过期检测与一致性扫描（只读）
+#
+# 背景：蓝图改过之后，早先生成的大纲和章节正文仍是旧蓝图的产物，
+# 但系统里没有地方记录这件事。实测一个项目蓝图角色是
+# [沈渡/苏宛/方规/陆沉/齐延年]，而 82 条大纲和正文用的是
+# 「陆行舟」「苏晚」——重叠为零，只能靠用户自己发现。
+#
+# 这两个接口都【只检测、不改动】：正文是几十万字的心血，
+# 且名字存在歧义（「苏宛」vs「苏晚」），必须由用户决定怎么处理。
+# ============================================================
+
+
+@router.get("/{project_id}/staleness")
+async def get_blueprint_staleness(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """报告哪些大纲/章节是基于旧蓝图生成的。
+
+    只做标记，不改动任何内容。``blueprint_revision`` 为空的历史数据
+    归入 ``unknown_*`` 而不是 ``stale_*``——没有依据就不能当成过期，
+    否则升级后所有老项目都会满屏告警。
+    """
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    service = BlueprintStalenessService(session)
+    return (await service.get_report(project_id)).to_dict()
+
+
+@router.get("/{project_id}/consistency-report")
+async def get_consistency_report(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """扫描大纲与正文里「不在当前蓝图角色表中」的名字。
+
+    只报告，不替换。改名场景下旧名与新名常常一字之差
+    （蓝图「苏宛」vs 大纲「苏晚」），程序无法判断是笔误还是两个角色，
+    只有作者知道正确答案。所以这里把可疑项连同出现位置列出来，
+    由用户决定是否处理。
+    """
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    service = BlueprintStalenessService(session)
+    return (await service.scan_names(project_id)).to_dict()
+
+
+# ============================================================
+# 角色改名的预览与应用
+#
+# 检测（/staleness、/consistency-report）只能告诉你哪里对不上，
+# 真正要改还得动手。这里提供「预览 → 确认 → 应用」三步：
+#
+#   POST .../rename-characters/preview   只算不改，返回每处改动+上下文
+#   POST .../rename-characters/apply     真正写入
+#
+# 为什么必须预览：中文名字歧义极多（蓝图「苏宛」vs 大纲「苏晚」一字之差；
+# 「陆行舟」可能被写作「行舟」；「陆」会出现在「陆续」里）。盲替会把
+# 「改个名字」变成「悄悄改坏正文」，而正文是几十万字的心血。
+#
+# 正文改动新建版本而非覆盖，原版永远可回退。
+# ============================================================
+
+
+@router.post("/{project_id}/rename-characters/preview")
+async def preview_character_rename(
+    project_id: str,
+    payload: CharacterRenameRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """预览改名会改动哪些地方（不写入任何数据）。"""
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    service = CharacterRenameService(session)
+    preview = await service.preview(project_id, payload.mapping)
+    return preview.to_dict()
+
+
+@router.post("/{project_id}/rename-characters/apply")
+async def apply_character_rename(
+    project_id: str,
+    payload: CharacterRenameRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """应用改名。
+
+    正文改动会**新建版本**并把当前版本指过去，原版本完整保留，
+    用户可随时在版本列表里切回。
+    """
+    novel_service = NovelService(session)
+    await novel_service.ensure_project_owner(project_id, current_user.id)
+
+    service = CharacterRenameService(session)
+    try:
+        result = await service.apply(
+            project_id, payload.mapping, include_prose=payload.include_prose
+        )
+    except ValueError as exc:
+        # 映射校验失败属于用户可修正的输入问题，返回 400 而不是 500
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.to_dict()

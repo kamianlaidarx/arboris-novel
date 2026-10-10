@@ -251,3 +251,22 @@ class BlueprintPatch(BaseModel):
 class EditChapterRequest(BaseModel):
     chapter_number: int
     content: str
+
+
+class CharacterRenameRequest(BaseModel):
+    """角色改名的映射。
+
+    只做**全名精确替换**，不猜简称：中文简称（「陆行舟」→「行舟」/「陆兄」）
+    需要用户明确指定，程序猜错会改坏正文。
+    """
+
+    #: {旧名: 新名}
+    mapping: Dict[str, str] = Field(
+        default_factory=dict,
+        description="旧名到新名的映射，如 {'陆行舟': '李明'}",
+    )
+    #: 是否同时替换章节正文。False 时只改大纲。
+    include_prose: bool = Field(
+        default=True,
+        description="是否替换正文；false 表示只改大纲",
+    )

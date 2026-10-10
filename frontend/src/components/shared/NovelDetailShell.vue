@@ -117,6 +117,12 @@
       <div class="flex-1 lg:ml-80 min-h-0 flex flex-col h-full">
         <div class="flex-1 min-h-0 h-full p-4 sm:p-6 lg:p-8 flex flex-col overflow-hidden box-border">
           <div class="flex-1 flex flex-col min-h-0 h-full">
+            <!-- 蓝图过期 / 名字不一致提示：只提示，不改动任何内容 -->
+            <BlueprintStalenessBanner
+              v-if="!isAdmin && projectId"
+              :project-id="projectId"
+              :refresh-key="stalenessRefreshKey"
+            />
             <!-- Material 3 Card -->
             <div 
               class="md-card md-card-elevated flex-1 h-full p-6 sm:p-8 min-h-[20rem] flex flex-col box-border" 
@@ -242,6 +248,7 @@ import { AdminAPI } from '@/api/admin'
 import type { NovelProject, NovelSectionResponse, NovelSectionType, AllSectionType } from '@/api/novel'
 import { formatDateTime } from '@/utils/date'
 import BlueprintEditModal from '@/components/BlueprintEditModal.vue'
+import BlueprintStalenessBanner from '@/components/BlueprintStalenessBanner.vue'
 import OverviewSection from '@/components/novel-detail/OverviewSection.vue'
 import WorldSettingSection from '@/components/novel-detail/WorldSettingSection.vue'
 import CharactersSection from '@/components/novel-detail/CharactersSection.vue'
@@ -266,6 +273,14 @@ const router = useRouter()
 const novelStore = useNovelStore()
 
 const projectId = route.params.id as string
+
+/**
+ * 递增以触发过期检测重新拉取。
+ *
+ * 蓝图保存后必须重新检测：否则用户刚改完角色名，提示条还是旧的，
+ * 会误以为「改了但没有影响」。
+ */
+const stalenessRefreshKey = ref(0)
 const isSidebarOpen = ref(typeof window !== 'undefined' ? window.innerWidth >= 1024 : true)
 
 const sections: Array<{ key: SectionKey; label: string; description: string }> = [
@@ -553,6 +568,9 @@ const handleSave = async (data: { field: string; content: any }) => {
       await loadSection('overview', true)
     }
     isModalOpen.value = false
+    // 蓝图改完立即重新检测：否则提示条还是旧状态，
+    // 用户会误以为「改了角色名却没有影响下游」。
+    stalenessRefreshKey.value += 1
   } catch (error) {
     console.error('保存变更失败:', error)
   }

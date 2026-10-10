@@ -842,11 +842,15 @@ async def generate_chapter(
             logger.warning("AI 评审失败，跳过: %s", exc)
 
     await novel_service.replace_chapter_versions(chapter, contents, metadata)
+    # 记录本章是基于哪个蓝图版本生成的，供之后判断是否过期。
+    chapter.blueprint_revision = await novel_service.get_blueprint_revision(project_id)
+    await session.commit()
     logger.info(
-        "项目 %s 第 %s 章生成完成，已写入 %s 个版本",
+        "项目 %s 第 %s 章生成完成，已写入 %s 个版本（蓝图版本 %s）",
         project_id,
         request.chapter_number,
         len(contents),
+        chapter.blueprint_revision,
     )
     return await _load_project_schema(novel_service, project_id, current_user.id)
 
@@ -1109,12 +1113,17 @@ async def generate_chapters_outline(
     try:
         data = json.loads(normalized)
         new_outlines = data.get("chapters", [])
+        # 这些大纲是照着当前蓝图写的，标记版本号，之后蓝图再变就能识别出过期。
+        current_revision = await novel_service.get_blueprint_revision(project_id)
         for item in new_outlines:
             await novel_service.update_or_create_outline(
                 project_id, 
                 item["chapter_number"], 
                 item["title"], 
                 item["summary"]
+            )
+            await novel_service.mark_outline_revision(
+                project_id, item["chapter_number"], current_revision
             )
         await session.commit()
     except Exception as exc:

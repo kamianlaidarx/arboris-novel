@@ -155,6 +155,30 @@ async def _ensure_schema_updates() -> None:
                         "ADD COLUMN llm_models_seeded BOOLEAN NOT NULL DEFAULT 0"
                     )
                 )
+
+            # 蓝图版本追踪：用于判断大纲/章节是否基于旧蓝图生成。
+            # 历史数据没有版本信息，所以 outline/chapter 两列可空（NULL=未知），
+            # 只有 blueprint 自己的 revision 需要非空默认值。
+            bp_columns = {col["name"] for col in inspector.get_columns("novel_blueprints")}
+            if "revision" not in bp_columns:
+                sync_conn.execute(
+                    text(
+                        "ALTER TABLE novel_blueprints "
+                        "ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
+                    )
+                )
+            if "content_fingerprint" not in bp_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE novel_blueprints ADD COLUMN content_fingerprint VARCHAR(64)")
+                )
+            if "blueprint_revision" not in columns:
+                sync_conn.execute(
+                    text("ALTER TABLE chapter_outlines ADD COLUMN blueprint_revision INTEGER")
+                )
+            if "blueprint_revision" not in chapter_columns:
+                sync_conn.execute(
+                    text("ALTER TABLE chapters ADD COLUMN blueprint_revision INTEGER")
+                )
         await conn.run_sync(_upgrade)
 
 
