@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.dependencies import get_current_user
 from ...db.session import get_session
+from ...schemas.novel import ApplyOptimizationRequest
 from ...schemas.user import UserInDB
 from ...services.llm_service import LLMService
 from ...services.novel_service import NovelService
@@ -220,15 +221,20 @@ async def optimize_chapter(
 
 @router.post("/apply-optimization")
 async def apply_optimization(
-    project_id: str,
-    chapter_number: int,
-    optimized_content: str,
+    payload: ApplyOptimizationRequest,
     session: AsyncSession = Depends(get_session),
     current_user: UserInDB = Depends(get_current_user),
 ):
+    """应用优化后的内容到章节。
+
+    参数走请求体而非查询串：优化后的正文动辄上万字，放进 URL 会超出
+    nginx 的 ``large_client_header_buffers`` 限制（默认 8k），
+    直接返回 414 URI Too Long——这正是此前「应用优化报错 414」的原因。
     """
-    应用优化后的内容到章节
-    """
+    project_id = payload.project_id
+    chapter_number = payload.chapter_number
+    optimized_content = payload.optimized_content
+
     novel_service = NovelService(session)
     
     # 验证项目所有权

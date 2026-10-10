@@ -314,3 +314,17 @@ class OutlineDraftPayload(BaseModel):
 
 class OutlineApplyRequest(BaseModel):
     drafts: List[OutlineDraftPayload] = Field(default_factory=list)
+
+
+class ApplyOptimizationRequest(BaseModel):
+    """应用优化结果。
+
+    为什么用请求体而不是查询参数：优化后的正文动辄上万字，
+    放进 URL 会超出 nginx 的 ``large_client_header_buffers`` 限制
+    （默认 8k），服务端直接返回 **414 URI Too Long**。
+    正文本来就该走请求体。
+    """
+
+    project_id: str
+    chapter_number: int
+    optimized_content: str

@@ -779,13 +779,16 @@ export class OptimizerAPI {
     chapterNumber: number,
     optimizedContent: string
   ): Promise<{ status: string; message: string }> {
-    const params = new URLSearchParams({
-      project_id: projectId,
-      chapter_number: chapterNumber.toString(),
-      optimized_content: optimizedContent
-    })
-    return request(`${OPTIMIZER_BASE}/apply-optimization?${params}`, {
-      method: 'POST'
+    // 必须走请求体：优化后的正文动辄上万字，放进 URL 会超出
+    // nginx 的 large_client_header_buffers 限制（默认 8k），
+    // 服务端直接返回 414 URI Too Long。
+    return request(`${OPTIMIZER_BASE}/apply-optimization`, {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        chapter_number: chapterNumber,
+        optimized_content: optimizedContent
+      })
     })
   }
 }
