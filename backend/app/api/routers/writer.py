@@ -1362,6 +1362,7 @@ async def regenerate_chapters_outline(
             keep_existing=request.keep_existing,
             llm_service=llm_service,
             prompt_service=prompt_service,
+            user_id=current_user.id,
         )
         return preview.to_dict()
 

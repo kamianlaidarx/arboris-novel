@@ -47,9 +47,11 @@ class FakeLLM:
         self._chapters = chapters if chapters is not None else []
         self._raw = raw
         self.last_prompt: str = ""
+        self.last_user_id: Any = "未传"
 
     async def get_llm_response(self, *, system_prompt: str, conversation_history, **kw) -> str:
         self.last_prompt = conversation_history[0]["content"]
+        self.last_user_id = kw.get("user_id")
         if self._raw is not None:
             return self._raw
         return json.dumps({"chapters": self._chapters}, ensure_ascii=False)
@@ -281,3 +283,22 @@ async def test_apply_ignores_invalid_chapter_number(session):
         "p1", [{"chapter_number": "abc", "title": "x", "summary": "y"}]
     )
     assert result == {"created": 0, "updated": 0}
+
+
+# ==================================================== 凭据来源（回归）
+
+async def test_generate_passes_user_id_for_credentials(session):
+    """回归：必须把 user_id 传给 LLM 层，否则会取错配置。
+
+    user_id 决定用哪一套 LLM 凭据（用户级 llm_configs 还是系统默认）。
+    早期版本在此写死 None，于是回退到系统配置——而系统配置里的模型名
+    在它指向的网关上并不存在，用户看到的是「模型不存在（上游 404）」，
+    极具误导性：他明明配好了自己的网关和模型。
+    """
+    llm = FakeLLM(_drafts(1, 1))
+    await OutlineRegenService(session).generate(
+        "p1", start_chapter=1, num_chapters=1,
+        llm_service=llm, prompt_service=FakePromptService(),
+        user_id=42,
+    )
+    assert llm.last_user_id == 42, "user_id 必须透传到 LLM 层，否则会取错凭据来源"

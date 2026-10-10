@@ -205,10 +205,17 @@ class OutlineRegenService:
         keep_existing: bool = True,
         llm_service: Any,
         prompt_service: Any,
+        user_id: Optional[int] = None,
     ) -> OutlineRegenPreview:
         """生成大纲草稿，**不写入数据库**。
 
         调用方拿到预览后交给用户确认，再调 :meth:`apply`。
+
+        ``user_id`` 必须传：它决定用哪一套 LLM 凭据（用户级还是系统级）。
+        早期版本在此写死 ``None``，于是回退到系统默认配置——而系统配置里的
+        模型名在它指向的网关上并不存在，表现为「模型不存在（上游 404）」。
+        这类错误很有误导性：用户明明配对了个人的模型与网关，
+        问题却出在代码取错了配置来源。
         """
         if num_chapters <= 0:
             raise ValueError("生成数量必须大于 0")
@@ -263,7 +270,7 @@ class OutlineRegenService:
             system_prompt=outline_prompt,
             conversation_history=[{"role": "user", "content": prompt_input}],
             temperature=0.7,
-            user_id=None,
+            user_id=user_id,
         )
 
         cleaned = remove_think_tags(raw)
