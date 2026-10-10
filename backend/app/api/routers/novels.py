@@ -1,7 +1,7 @@
 # AIMETA P=小说API_项目和章节管理|R=小说CRUD_章节管理|NR=不含内容生成|E=route:GET_POST_/api/novels/*|X=http|A=小说CRUD_章节|D=fastapi,sqlalchemy|S=db|RD=./README.ai
 import json
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -27,6 +27,7 @@ from ...services.llm_service import LLMService
 from ...services.novel_service import NovelService
 from ...services.prompt_service import PromptService
 from ...utils.json_utils import remove_think_tags, sanitize_json_like_text, unwrap_markdown_json
+from ...utils.sse import run_with_heartbeat, sse_response
 
 logger = logging.getLogger(__name__)
 
@@ -337,13 +338,60 @@ async def converse_with_concept_stream(
     )
 
 
+@router.post("/{project_id}/blueprint/generate-stream")
+async def generate_blueprint_stream(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """蓝图生成的流式版本（SSE）。
+
+    蓝图实测耗时 160 秒（模型返回 15260 字符），远超 Cloudflare 免费版的
+    100 秒源站等待上限，非流式必然 524。这里用「心跳帧 + 完成事件」的方式：
+    即使模型长时间不出字，连接也一直有数据流动，不会被按静默超时掐断。
+
+    事件::
+
+        : keep-alive      注释帧（每 10 秒，客户端忽略）
+        event: done       data: {...蓝图结果...}
+        event: error      data: {"detail": "..."}
+    """
+
+    async def _work():
+        return await _build_blueprint(project_id, session, current_user)
+
+    async def _stream():
+        async for frame in run_with_heartbeat(
+            _work,
+            on_done=lambda result: result,
+            label="蓝图生成",
+        ):
+            yield frame
+
+    return sse_response(_stream())
+
+
 @router.post("/{project_id}/blueprint/generate", response_model=BlueprintGenerationResponse)
 async def generate_blueprint(
     project_id: str,
     session: AsyncSession = Depends(get_session),
     current_user: UserInDB = Depends(get_current_user),
 ) -> BlueprintGenerationResponse:
-    """根据完整对话生成可执行的小说蓝图。"""
+    """根据完整对话生成可执行的小说蓝图（非流式，保留兼容）。
+
+    新前端请用 ``/blueprint/generate-stream``：这个版本在慢模型下
+    会超过反向代理的源站等待上限（Cloudflare 免费版 100 秒）。
+    """
+    result = await _build_blueprint(project_id, session, current_user)
+    return BlueprintGenerationResponse(**result)
+
+
+async def _build_blueprint(
+    project_id: str,
+    session: AsyncSession,
+    current_user: UserInDB,
+) -> Dict[str, Any]:
+    """蓝图生成的实际逻辑，供流式与非流式两个端点共用。"""
     novel_service = NovelService(session)
     prompt_service = PromptService(session)
     llm_service = LLMService(session)
@@ -422,7 +470,9 @@ async def generate_blueprint(
     ai_message = (
         "太棒了！我已经根据我们的对话整理出完整的小说蓝图。请确认是否进入写作阶段，或提出修改意见。"
     )
-    return BlueprintGenerationResponse(blueprint=blueprint, ai_message=ai_message)
+    # 返回 dict 而不是 Pydantic 模型：流式端点需要 JSON 序列化它，
+    # 非流式端点再用它构造响应模型，一份数据两处复用。
+    return {"blueprint": blueprint.model_dump(), "ai_message": ai_message}
 
 
 @router.post("/{project_id}/blueprint/save", response_model=NovelProjectSchema)

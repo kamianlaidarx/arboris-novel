@@ -1264,3 +1264,45 @@ async def edit_chapter_content_fast(
         generation_status=ChapterGenerationStatus(status_value),
         word_count=chapter.word_count or 0,
     )
+
+
+# ============================================================
+# 长任务的流式变体
+#
+# 章节生成、评审、大纲生成都属于「模型要跑几十秒到几分钟」的操作，
+# 非流式时连接期间完全静默，会被反向代理按源站等待上限掐断
+# （Cloudflare 免费版 100 秒，实测蓝图 160 秒、章节更久）。
+#
+# 这里为它们各注册一个 -stream 变体：复用原端点的实现与签名，
+# 只是放进后台任务并持续发心跳，使连接始终有数据流动。
+# ============================================================
+
+from ...utils.sse import register_stream_route as _register_stream_route
+
+_register_stream_route(
+    router,
+    "/advanced/generate-stream",
+    label="高级章节生成",
+    original=advanced_generate_chapter,
+)
+
+_register_stream_route(
+    router,
+    "/novels/{project_id}/chapters/generate-stream",
+    label="章节生成",
+    original=generate_chapter,
+)
+
+_register_stream_route(
+    router,
+    "/novels/{project_id}/chapters/evaluate-stream",
+    label="章节评审",
+    original=evaluate_chapter,
+)
+
+_register_stream_route(
+    router,
+    "/novels/{project_id}/chapters/outline-stream",
+    label="章节大纲生成",
+    original=generate_chapters_outline,
+)

@@ -34,6 +34,81 @@ const parseSseEvent = (raw: string): { event: string; data: any } | null => {
   }
 }
 
+/**
+ * 调用「长任务」的流式端点，返回最终的 done 事件负载。
+ *
+ * 后端这类端点会周期发送注释帧（`: keep-alive`）保活，
+ * 因此这里不需要处理增量文本，只要：
+ *   - 持续读取，避免连接被判定为空闲
+ *   - 统计已等待秒数，供界面显示「已等待 Ns」
+ *   - 拿到 done 就返回，拿到 error 就抛出
+ *
+ * 为什么必须流式：Cloudflare 免费版对「源站 100 秒未响应」返回 524，
+ * 而章节生成/蓝图生成远超这个时间。
+ */
+const callLongTaskStream = async <T>(
+  url: string,
+  body: any,
+  options: { onProgress?: (seconds: number) => void } = {}
+): Promise<T> => {
+  const authStore = useAuthStore()
+  const started = Date.now()
+
+  const response = await fetch(`${API_BASE_URL}${url}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${authStore.token}`
+    },
+    body: JSON.stringify(body ?? {})
+  })
+
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null)
+    const message = detail?.detail || `请求失败（HTTP ${response.status}）`
+    throw new Error(typeof message === 'string' ? message : JSON.stringify(message))
+  }
+  if (!response.body) throw new Error('浏览器不支持流式响应')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let final: T | null = null
+  let streamError: string | null = null
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() ?? ''
+
+      for (const part of parts) {
+        // 注释帧（心跳）只用于保活，顺带把已等待时间报给界面
+        if (part.startsWith(':')) {
+          options.onProgress?.(Math.round((Date.now() - started) / 1000))
+          continue
+        }
+        const evt = parseSseEvent(part)
+        if (!evt) continue
+        if (evt.event === 'done') {
+          final = evt.data as T
+        } else if (evt.event === 'error') {
+          streamError = evt.data?.detail ?? 'AI 返回错误'
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  if (streamError) throw new Error(streamError)
+  if (!final) throw new Error('AI 未返回有效内容')
+  return final
+}
+
 // 统一的请求处理函数
 const request = async (url: string, options: RequestInit = {}) => {
   const authStore = useAuthStore()
@@ -316,10 +391,16 @@ export class NovelAPI {
     return final
   }
 
-  static async generateBlueprint(projectId: string): Promise<BlueprintGenerationResponse> {
-    return request(`${NOVELS_BASE}/${projectId}/blueprint/generate`, {
-      method: 'POST'
-    })
+  static async generateBlueprint(
+    projectId: string,
+    options: { onProgress?: (seconds: number) => void } = {}
+  ): Promise<BlueprintGenerationResponse> {
+    // 走流式端点：蓝图实测要 160 秒，非流式会被 Cloudflare 以 524 掐断。
+    return callLongTaskStream(
+      `${NOVELS_BASE}/${projectId}/blueprint/generate-stream`,
+      {},
+      options
+    )
   }
 
   static async saveBlueprint(projectId: string, blueprint: Blueprint): Promise<NovelProject> {
@@ -329,18 +410,29 @@ export class NovelAPI {
     })
   }
 
-  static async generateChapter(projectId: string, chapterNumber: number): Promise<NovelProject> {
-    return request(`${WRITER_BASE}/${projectId}/chapters/generate`, {
-      method: 'POST',
-      body: JSON.stringify({ chapter_number: chapterNumber })
-    })
+  static async generateChapter(
+    projectId: string,
+    chapterNumber: number,
+    options: { onProgress?: (seconds: number) => void } = {}
+  ): Promise<NovelProject> {
+    // 章节生成是最重的操作（多阶段 LLM 调用），必须走流式。
+    return callLongTaskStream(
+      `${WRITER_BASE}/${projectId}/chapters/generate-stream`,
+      { chapter_number: chapterNumber },
+      options
+    )
   }
 
-  static async evaluateChapter(projectId: string, chapterNumber: number): Promise<NovelProject> {
-    return request(`${WRITER_BASE}/${projectId}/chapters/evaluate`, {
-      method: 'POST',
-      body: JSON.stringify({ chapter_number: chapterNumber })
-    })
+  static async evaluateChapter(
+    projectId: string,
+    chapterNumber: number,
+    options: { onProgress?: (seconds: number) => void } = {}
+  ): Promise<NovelProject> {
+    return callLongTaskStream(
+      `${WRITER_BASE}/${projectId}/chapters/evaluate-stream`,
+      { chapter_number: chapterNumber },
+      options
+    )
   }
 
   static async selectChapterVersion(
@@ -393,13 +485,13 @@ export class NovelAPI {
     startChapter: number,
     numChapters: number
   ): Promise<NovelProject> {
-    return request(`${WRITER_BASE}/${projectId}/chapters/outline`, {
-      method: 'POST',
-      body: JSON.stringify({
+    return callLongTaskStream(
+      `${WRITER_BASE}/${projectId}/chapters/outline-stream`,
+      {
         start_chapter: startChapter,
         num_chapters: numChapters
-      })
-    })
+      }
+    )
   }
 
   static async updateBlueprint(projectId: string, data: Record<string, any>): Promise<NovelProject> {
@@ -458,10 +550,12 @@ export class OptimizerAPI {
    * 对章节内容进行分层优化
    */
   static async optimizeChapter(optimizeReq: OptimizeRequest): Promise<OptimizeResponse> {
-    return request(`${OPTIMIZER_BASE}/optimize`, {
-      method: 'POST',
-      body: JSON.stringify(optimizeReq)
-    })
+    // 分层优化逐维度调用模型，总耗时长，走流式避免被代理掐断。
+    // 注意 OPTIMIZER_BASE 已含 API_BASE_URL，这里要传相对路径。
+    return callLongTaskStream(
+      `${API_PREFIX}/optimizer/optimize-stream`,
+      optimizeReq
+    )
   }
 
   /**

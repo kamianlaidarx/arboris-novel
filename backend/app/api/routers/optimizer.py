@@ -257,3 +257,21 @@ async def apply_optimization(
     )
     
     return {"status": "success", "message": "优化内容已应用"}
+
+
+# ============================================================
+# 优化端点的流式变体
+#
+# 分层优化会逐维度调用模型（对话/环境/心理/节奏），单次 600 秒超时，
+# 总耗时容易超过反向代理的源站等待上限（Cloudflare 免费版 100 秒）。
+# 复用原实现，只把执行放进后台任务并持续发心跳。
+# ============================================================
+
+from ...utils.sse import register_stream_route as _register_stream_route
+
+_register_stream_route(
+    router,
+    "/optimize-stream",
+    label="章节优化",
+    original=optimize_chapter,
+)
