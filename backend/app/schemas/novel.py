@@ -115,6 +115,28 @@ class NovelProjectSummary(BaseModel):
     total_chapters: int
 
 
+class BlueprintGenerateRequest(BaseModel):
+    """蓝图生成的可选用户输入。
+
+    背景：蓝图原本只依据「概念对话历史」生成，用户对角色命名等细节
+    没有任何直接输入通道，只能反复对话去间接影响，且模型每次取名
+    都趋同（同一套提示词下分布收敛）。这里补一个显式通道。
+    """
+
+    #: 候选主角名。模型从中挑一个作为主角；留空则自由发挥。
+    #: 做成列表而非单值：用户常想给几个风格相近的名字让模型选。
+    protagonist_names: List[str] = Field(
+        default_factory=list,
+        description="候选主角名，模型从中选一个；留空则由模型自行命名",
+    )
+    #: 自由修改意见。可写任何要求，例如「主角是女性」「不要系统流」
+    #: 「世界观偏硬科幻」。会作为高优先级指令拼进提示词。
+    instructions: str = Field(
+        default="",
+        description="用户对蓝图的额外要求，会作为高优先级指令传给模型",
+    )
+
+
 class BlueprintGenerationResponse(BaseModel):
     blueprint: Blueprint
     ai_message: str

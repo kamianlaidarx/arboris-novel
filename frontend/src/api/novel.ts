@@ -393,13 +393,21 @@ export class NovelAPI {
 
   static async generateBlueprint(
     projectId: string,
-    options: { onProgress?: (seconds: number) => void } = {}
+    options: {
+      protagonistNames?: string[]
+      instructions?: string
+      onProgress?: (seconds: number) => void
+    } = {}
   ): Promise<BlueprintGenerationResponse> {
     // 走流式端点：蓝图实测要 160 秒，非流式会被 Cloudflare 以 524 掐断。
     return callLongTaskStream(
       `${NOVELS_BASE}/${projectId}/blueprint/generate-stream`,
-      {},
-      options
+      {
+        // 后端字段名是 snake_case
+        protagonist_names: options.protagonistNames ?? [],
+        instructions: options.instructions ?? ''
+      },
+      { onProgress: options.onProgress }
     )
   }
 

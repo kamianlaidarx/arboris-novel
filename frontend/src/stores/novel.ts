@@ -115,7 +115,9 @@ export const useNovelStore = defineStore('novel', () => {
     }
   }
 
-  async function generateBlueprint(): Promise<BlueprintGenerationResponse> {
+  async function generateBlueprint(
+    options: { protagonistNames?: string[]; instructions?: string } = {}
+  ): Promise<BlueprintGenerationResponse> {
     // Generate blueprint from conversation history
     isLoading.value = true
     error.value = null
@@ -123,7 +125,7 @@ export const useNovelStore = defineStore('novel', () => {
       if (!currentProject.value) {
         throw new Error('没有当前项目')
       }
-      return await NovelAPI.generateBlueprint(currentProject.value.id)
+      return await NovelAPI.generateBlueprint(currentProject.value.id, options)
     } catch (err) {
       error.value = err instanceof Error ? err.message : '生成蓝图失败'
       throw err

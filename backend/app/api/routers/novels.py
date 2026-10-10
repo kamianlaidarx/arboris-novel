@@ -1,7 +1,7 @@
 # AIMETA P=小说API_项目和章节管理|R=小说CRUD_章节管理|NR=不含内容生成|E=route:GET_POST_/api/novels/*|X=http|A=小说CRUD_章节|D=fastapi,sqlalchemy|S=db|RD=./README.ai
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -11,6 +11,7 @@ from ...core.dependencies import get_current_user
 from ...db.session import get_session
 from ...schemas.novel import (
     Blueprint,
+    BlueprintGenerateRequest,
     BlueprintGenerationResponse,
     BlueprintPatch,
     Chapter as ChapterSchema,
@@ -341,6 +342,7 @@ async def converse_with_concept_stream(
 @router.post("/{project_id}/blueprint/generate-stream")
 async def generate_blueprint_stream(
     project_id: str,
+    options: BlueprintGenerateRequest | None = Body(None),
     session: AsyncSession = Depends(get_session),
     current_user: UserInDB = Depends(get_current_user),
 ):
@@ -350,6 +352,13 @@ async def generate_blueprint_stream(
     100 秒源站等待上限，非流式必然 524。这里用「心跳帧 + 完成事件」的方式：
     即使模型长时间不出字，连接也一直有数据流动，不会被按静默超时掐断。
 
+    请求体（可选）::
+
+        {
+          "protagonist_names": ["沈渡", "陆沉"],   // 候选主角名，模型挑一个
+          "instructions": "主角是女性，不要系统流"  // 自由修改意见
+        }
+
     事件::
 
         : keep-alive      注释帧（每 10 秒，客户端忽略）
@@ -358,7 +367,7 @@ async def generate_blueprint_stream(
     """
 
     async def _work():
-        return await _build_blueprint(project_id, session, current_user)
+        return await _build_blueprint(project_id, session, current_user, options)
 
     async def _stream():
         async for frame in run_with_heartbeat(
@@ -374,6 +383,7 @@ async def generate_blueprint_stream(
 @router.post("/{project_id}/blueprint/generate", response_model=BlueprintGenerationResponse)
 async def generate_blueprint(
     project_id: str,
+    options: BlueprintGenerateRequest | None = Body(None),
     session: AsyncSession = Depends(get_session),
     current_user: UserInDB = Depends(get_current_user),
 ) -> BlueprintGenerationResponse:
@@ -382,14 +392,66 @@ async def generate_blueprint(
     新前端请用 ``/blueprint/generate-stream``：这个版本在慢模型下
     会超过反向代理的源站等待上限（Cloudflare 免费版 100 秒）。
     """
-    result = await _build_blueprint(project_id, session, current_user)
+    result = await _build_blueprint(project_id, session, current_user, options)
     return BlueprintGenerationResponse(**result)
+
+
+def _build_blueprint_constraints(options: Optional[BlueprintGenerateRequest]) -> str:
+    """把用户的显式要求拼成提示词尾部的高优先级约束块。
+
+    为什么单独成块而不是混进对话历史：这两类输入的权威性不同。
+    对话历史是「聊过的内容」，可能含糊、可能被推翻；
+    而这里填的是用户在生成前的最终决定，应当压过历史里的推测。
+    所以明确告诉模型「以此为准」。
+
+    没有输入时返回空串，提示词保持原样（不影响既有行为）。
+    """
+    if options is None:
+        return ""
+
+    names = [n.strip() for n in (options.protagonist_names or []) if n and n.strip()]
+    instructions = (options.instructions or "").strip()
+    if not names and not instructions:
+        return ""
+
+    lines: List[str] = [
+        "",
+        "---",
+        "",
+        "# 用户的明确要求（优先级高于以上对话历史，必须遵守）",
+        "",
+    ]
+
+    if names:
+        listed = "、".join(names)
+        lines += [
+            f"主角姓名必须从以下候选中选择**一个**：{listed}",
+            "",
+            "要求：",
+            "- `characters` 数组里主角（第一位，或 `relationship_to_protagonist` 为「本人」的那位）的 `name` 必须是上述候选之一，原样使用，不得改写、加姓氏或加称号。",
+            "- 其余角色（配角、反派、师长等）可以自行命名，但风格要与所选主角名协调。",
+            "- 在 `one_sentence_summary` 或 `full_synopsis` 中自然使用该主角名。",
+            "",
+        ]
+
+    if instructions:
+        lines += [
+            "用户对蓝图还有以下要求：",
+            "",
+            instructions,
+            "",
+            "以上要求若与对话历史冲突，以本节为准。",
+            "",
+        ]
+
+    return "\n".join(lines)
 
 
 async def _build_blueprint(
     project_id: str,
     session: AsyncSession,
     current_user: UserInDB,
+    options: Optional[BlueprintGenerateRequest] = None,
 ) -> Dict[str, Any]:
     """蓝图生成的实际逻辑，供流式与非流式两个端点共用。"""
     novel_service = NovelService(session)
@@ -432,6 +494,7 @@ async def _build_blueprint(
         )
 
     system_prompt = _ensure_prompt(await prompt_service.get_prompt("screenwriting"), "screenwriting")
+    system_prompt = system_prompt + _build_blueprint_constraints(options)
     blueprint_raw = await llm_service.get_llm_response(
         system_prompt=system_prompt,
         conversation_history=formatted_history,

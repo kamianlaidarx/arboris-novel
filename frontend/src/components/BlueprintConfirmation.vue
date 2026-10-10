@@ -102,25 +102,72 @@
     </div>
 
     <!-- 操作按钮 -->
-    <div v-else class="text-center space-x-4">
-      <!-- <button
-        @click="$emit('back')"
-        class="bg-gray-200 text-gray-700 font-bold py-3 px-8 rounded-full hover:bg-gray-300 transition-all duration-300 transform hover:scale-105"
-      >
-        返回对话
-      </button> -->
-      <button
-        @click="generateBlueprint"
-        :disabled="isGenerating"
-        class="bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold py-3 px-8 rounded-full hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-      >
-        <span class="flex items-center justify-center">
-          <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
-            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"></path>
-          </svg>
-          开始创建蓝图
-        </span>
-      </button>
+    <div v-else class="mx-auto max-w-2xl">
+      <!-- 生成前的可选设置：主角名与修改意见 -->
+      <div class="mb-6 rounded-2xl border border-gray-200 bg-white/80 p-5 text-left">
+        <p class="mb-4 text-sm text-gray-600">
+          可选：指定主角名或补充要求；留空则由 AI 自由发挥。
+        </p>
+
+        <!-- 候选主角名 -->
+        <label class="mb-1 block text-sm font-medium text-gray-700">
+          候选主角名
+          <span class="ml-1 font-normal text-gray-400">（回车添加，AI 从中选一个）</span>
+        </label>
+        <div
+          class="mb-2 flex flex-wrap gap-1.5 rounded-lg border p-2"
+          :class="nameInputFocused ? 'border-indigo-300' : 'border-gray-200'"
+        >
+          <span
+            v-for="(name, i) in protagonistNames"
+            :key="name + i"
+            class="inline-flex items-center gap-1 rounded-md bg-indigo-50 px-2 py-1 text-sm text-indigo-700"
+          >
+            {{ name }}
+            <button
+              type="button"
+              class="text-indigo-400 hover:text-indigo-700"
+              @click="protagonistNames.splice(i, 1)"
+            >×</button>
+          </span>
+          <input
+            v-model="nameDraft"
+            type="text"
+            placeholder="输入名字后回车，如 沈渡"
+            class="min-w-[10rem] flex-1 border-none bg-transparent px-1 py-1 text-sm outline-none"
+            @keydown.enter.prevent="addName"
+            @focus="nameInputFocused = true"
+            @blur="onNameBlur"
+          />
+        </div>
+
+        <!-- 修改意见 -->
+        <label class="mb-1 mt-4 block text-sm font-medium text-gray-700">
+          修改意见
+          <span class="ml-1 font-normal text-gray-400">（可写任何要求）</span>
+        </label>
+        <textarea
+          v-model="instructions"
+          rows="3"
+          placeholder="例如：主角是女性，不要系统流，世界观偏硬科幻"
+          class="w-full resize-y rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-indigo-300"
+        ></textarea>
+      </div>
+
+      <div class="text-center">
+        <button
+          @click="generateBlueprint"
+          :disabled="isGenerating"
+          class="bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold py-3 px-8 rounded-full hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+        >
+          <span class="flex items-center justify-center">
+            <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"></path>
+            </svg>
+            {{ isGenerating ? '生成中…' : '开始创建蓝图' }}
+          </span>
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -150,9 +197,43 @@ const emit = defineEmits<{
 
 const novelStore = useNovelStore()
 const isGenerating = ref(false)
+
+/**
+ * 生成蓝图前的可选输入。
+ *
+ * 背景：蓝图原本只依据概念对话历史生成，用户对角色命名没有任何直接
+ * 输入通道——只能靠多轮对话间接影响，而模型每次取名都趋同
+ * （同一套提示词下分布收敛，实测都是「姓+古风字」的套路）。
+ * 这里补上显式通道：候选名池 + 自由修改意见。
+ */
+const protagonistNames = ref<string[]>([])
+const nameDraft = ref('')
+const nameInputFocused = ref(false)
+const instructions = ref('')
+
+/** 把输入框里的草稿收进候选名列表（去重、去空白）。 */
+const addName = () => {
+  const value = nameDraft.value.trim()
+  if (value && !protagonistNames.value.includes(value)) {
+    protagonistNames.value.push(value)
+  }
+  nameDraft.value = ''
+}
+
+/** 失焦时先收草稿，避免用户输入后直接点按钮导致内容丢失。 */
+const onNameBlur = () => {
+  nameInputFocused.value = false
+  addName()
+}
+
 const progress = ref(0)
 const timeElapsed = ref(0)
-const maxTime = 180 // 180秒超时
+// 客户端只做「进度条上限」的参考值，不再是硬性中断点。
+// 原值 180 秒：实测蓝图生成有 160 秒的记录，余量太小；
+// 且这个定时器并不会真正取消请求（fetch 仍在跑），
+// 只是弹一个「生成超时」的错误，反而误导用户。
+// 现在真正的超时由后端控制（LLM 层 + 反向代理），这里放宽到 15 分钟。
+const maxTime = 900
 
 let progressTimer: NodeJS.Timeout | null = null
 let timeoutTimer: NodeJS.Timeout | null = null
@@ -215,9 +296,15 @@ const generateBlueprint = async () => {
   }, maxTime * 1000)
 
   try {
+    // 先把输入框里的草稿收进候选名，避免用户输入后直接点按钮导致丢失
+    addName()
+
     // 直接调用store中的API
     console.log('开始调用generateBlueprint API...')
-    const response = await novelStore.generateBlueprint()
+    const response = await novelStore.generateBlueprint({
+      protagonistNames: protagonistNames.value,
+      instructions: instructions.value
+    })
     console.log('API调用成功，收到响应:', response)
 
     // API成功后，快速完成进度条到100%
